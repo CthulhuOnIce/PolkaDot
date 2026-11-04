@@ -196,6 +196,43 @@ def _long_vrules(ink: np.ndarray, y0: int, y1: int, dpi: int) -> list[tuple[int,
     return out
 
 
+def _boxed(ink: np.ndarray, a: int, b: int, y0: int, y1: int) -> bool:
+    """Are two vertical rules at x=a and x=b joined by a horizontal rule
+    (the top or bottom of a box)?  Two rules either side of the gutter -
+    our page's frame and the facing page's - never are."""
+    if b - a < 4:
+        return False
+    band = ink[max(0, y0 - 40):y1 + 40, a:b] > 0
+    if band.size == 0:
+        return False
+    return bool((band.mean(axis=1) >= 0.85).any())
+
+
+def _cut_border_sliver(profile: np.ndarray, lo: int, hi: int, size: int, dpi: int,
+                       touch: float = 0.02, reach: float = 0.16) -> tuple[int, int]:
+    """If the span [lo, hi) starts/ends at the image border, move that end
+    inward to the emptiest position within ``reach`` of the border."""
+    k = max(3, int(dpi * 0.03))
+    sm = np.convolve(profile, np.ones(k) / k, mode="same")
+    span = sm[lo:hi]
+    if span.size == 0:
+        return lo, hi
+    level = float(np.median(span[span > 0])) if (span > 0).any() else 0.0
+    if lo <= size * touch:
+        a, b = lo + int(dpi * 0.05), min(hi, int(size * reach))
+        if b > a:
+            i = a + int(np.argmin(sm[a:b]))
+            if sm[i] <= level * 0.12:
+                lo = i
+    if hi >= size * (1 - touch):
+        a, b = max(lo, int(size * (1 - reach))), hi - int(dpi * 0.05)
+        if b > a:
+            i = a + int(np.argmin(sm[a:b]))
+            if sm[i] <= level * 0.12:
+                hi = i
+    return lo, hi
+
+
 def _absorb(colp: np.ndarray, start: int, direction: int, dpi: int, w: int, dark_between) -> int:
     """Extend an edge over nearby glyph columns (unboxed side matter)."""
     thresh = max(1.0, colp.max() * 0.01)
@@ -319,28 +356,39 @@ def find_content_bbox(gray: np.ndarray, ink: np.ndarray, dpi: int) -> BBox:
     if runs2:
         x0, x1, _ = runs2[0]
 
+    # 1b. print running right up to the image border is the facing page
+    #     (or the book edge) glued onto the core by a tight gutter: cut it
+    #     off at the deepest whitespace valley near that border
+    x0, x1 = _cut_border_sliver(glyphs[y0:y1].sum(axis=0).astype(float), x0, x1, w, dpi)
+    y0, y1 = _cut_border_sliver(glyphs[:, x0:x1].sum(axis=1).astype(float), y0, y1, h, dpi)
+    colp2 = glyphs[y0:y1].sum(axis=0).astype(float)
+
     # 2. walk outwards over the page frame: long vertical rules right next
     #    to the core (a column rule / the inner border of a side ad) and,
     #    one step further, the outer border of that side-ad box.
     vr = _long_vrules(ink, y0, y1, dpi)
     near, far = dpi * 0.25, dpi * 1.25
     gx0, gx1 = x0, x1
-    left_inner = [r for r in vr if x0 - near <= r[1] <= x0 + dpi * 0.05]
+    left_inner = [r for r in vr if x0 - near <= r[1] <= x0 + dpi * 0.1]
     if left_inner:
-        edge = min(r[0] for r in left_inner)
+        edge = max(r[0] for r in left_inner)        # the rule nearest the print
         gx0 = min(gx0, edge)
         outer = [r for r in vr if edge - far <= r[1] < edge - dpi * 0.3
-                 and not dark_between(r[1], edge)]
+                 and not dark_between(r[1], edge) and r[0] > w * 0.02
+                 and colp2[r[1]:edge].sum() >= 0.015 * colp2.sum()    # a box with print in it
+                 and _boxed(ink, r[0], edge, y0, y1)]
         if outer:
             gx0 = min(r[0] for r in outer)
     else:
         gx0 = _absorb(colp2, x0, -1, dpi, w, dark_between)
-    right_inner = [r for r in vr if x1 - dpi * 0.05 <= r[0] <= x1 + near]
+    right_inner = [r for r in vr if x1 - dpi * 0.1 <= r[0] <= x1 + near]
     if right_inner:
-        edge = max(r[1] for r in right_inner)
+        edge = min(r[1] for r in right_inner)       # the rule nearest the print
         gx1 = max(gx1, edge)
         outer = [r for r in vr if edge + dpi * 0.3 < r[0] <= edge + far
-                 and not dark_between(edge, r[0])]
+                 and not dark_between(edge, r[0]) and r[1] < w * 0.98
+                 and colp2[edge:r[0]].sum() >= 0.015 * colp2.sum()
+                 and _boxed(ink, edge, r[1], y0, y1)]
         if outer:
             gx1 = max(r[1] for r in outer)
     else:
@@ -472,16 +520,17 @@ def find_solid_panels(ink: np.ndarray, content: BBox, dpi: int,
 
 
 def expand_to_rules(content: BBox, rules: "RuleLines", dpi: int,
-                    reach: float = 0.15) -> BBox:
+                    reach: float = 0.15, reach_x: float = 0.08) -> BBox:
     """Grow ``content`` so that ruling lines framing the printed area just
     outside it (ad box borders, page frames) are included."""
     r = dpi * reach
+    rx = dpi * reach_x          # sideways the facing page is close: be strict
     out = content
     for s in rules.h_segments:
         if s.x_overlap(content) >= 0.5 * s.width and content.y0 - r <= s.cy <= content.y1 + r:
             out = out.union(BBox(out.x0, s.y0, out.x1, s.y1))
     for s in rules.v_segments:
-        if s.y_overlap(content) >= 0.5 * s.height and content.x0 - r <= s.cx <= content.x1 + r:
+        if s.y_overlap(content) >= 0.5 * s.height and content.x0 - rx <= s.cx <= content.x1 + rx:
             out = out.union(BBox(s.x0, out.y0, s.x1, out.y1))
     return out
 

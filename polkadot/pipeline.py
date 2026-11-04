@@ -627,10 +627,14 @@ def build_ads(work: PageWork) -> None:
             continue
         frame = work.region_frames.get(r.id, [])
         text = join_lines([t for t, *_ in frame]) if frame else r.text
+        if sum(c.isalpha() for c in text) < 3:
+            continue          # a page number, an ornament or an unreadable cut
         f = P.ad_fields(frame, text)
         cat = None
         if r.meta.get("label_region") in labels:
             cat = P.clean_heading(labels[r.meta["label_region"]].text).title() or None
+            if cat and sum(c.isalpha() for c in cat) < 3:
+                cat = None
         ad = Ad(id=f"p{res.page + 1}_ad{len(res.ads)}", page=res.page, region_id=r.id,
                 kind=r.kind, bbox=r.bbox, rotation=r.rotation, text=text,
                 business_name=f.get("business_name") or None, category=cat,
