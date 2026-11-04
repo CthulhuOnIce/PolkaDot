@@ -100,6 +100,8 @@ text layer.
 polkadot info DIRECTORY.pdf                    # pages, text-layer quality, OCR available?
 polkadot process DIRECTORY.pdf -o out/         # everything
 polkadot process DIRECTORY.pdf -o out/ -p 130-160 --dpi 300 -j 8
+polkadot process DIRECTORY.pdf -o out/ --keep-pages   # keep page images + work.pkl ...
+polkadot reparse out/ --sections "503-:classified"    # ... to re-parse / re-export without OCR
 polkadot layout DIRECTORY.pdf -p 42 -o p42.png # check the segmentation of one page
 polkadot strip-text IN.pdf OUT.pdf -p 1-20     # image-only copy, to test the OCR path
 ```

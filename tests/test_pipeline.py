@@ -112,3 +112,16 @@ def test_cli_strip_text(tmp_path):
     with pymupdf.open(dst) as d2:
         assert d2[0].get_text().strip() == ""
         assert d2[0].get_images()
+
+
+@needs_ocr
+def test_cli_reparse(tmp_path):
+    pdf = tmp_path / "synthetic.pdf"
+    synth.make_pdf(pdf, pages=1)
+    out = tmp_path / "out"
+    assert main(["process", str(pdf), "-o", str(out), "--dpi", "200", "-j", "1", "-q",
+                 "--keep-pages", "--sections", "1:alphabetical"]) == 0
+    assert (out / "work.pkl").exists()
+    assert main(["reparse", str(out), "--sections", "1:street"]) == 0
+    pages = [json.loads(l) for l in open(out / "pages.jsonl")]
+    assert pages[0]["section"] == "street"

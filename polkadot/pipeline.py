@@ -572,6 +572,32 @@ def process_document(doc_path: str, pages: Optional[Iterable[int]] = None,
     return works
 
 
+def reparse(works: list[PageWork], overrides: Optional[dict[int, str]] = None) -> list[PageWork]:
+    """Re-run phase B (sections, entries, ads) on already analysed pages."""
+    for w in works:
+        w.result.entries = []
+        w.result.ads = []
+        w.result.section = ""
+    assign_sections(works, overrides or {})
+    ctx = Context()
+    for w in works:
+        build_entries(w, ctx)
+        build_ads(w)
+    return works
+
+
+def save_works(works: list[PageWork], path: str) -> None:
+    import pickle
+    with open(path, "wb") as fh:
+        pickle.dump(works, fh, protocol=pickle.HIGHEST_PROTOCOL)
+
+
+def load_works(path: str) -> list[PageWork]:
+    import pickle
+    with open(path, "rb") as fh:
+        return pickle.load(fh)
+
+
 def summarize(works: list[PageWork]) -> dict:
     c = Counter()
     secs = Counter()

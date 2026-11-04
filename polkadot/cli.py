@@ -1,6 +1,7 @@
 """Command line interface.
 
     polkadot process  DIRECTORY.pdf -o out/       full extraction
+    polkadot reparse  out/ --sections ...         re-parse a kept run without OCR
     polkadot layout   DIRECTORY.pdf -p 42 -o x.png  draw the segmentation of one page
     polkadot info     DIRECTORY.pdf               page count / text-layer quality
     polkadot strip-text IN.pdf OUT.pdf            make an image-only copy (for testing OCR)
@@ -33,7 +34,7 @@ def cmd_process(a: argparse.Namespace) -> int:
     from . import export, postprocess
     from .ocr import OcrConfig, tesseract_available
     from .pipeline import (PipelineConfig, parse_page_spec, parse_section_map,
-                           process_document, summarize)
+                           process_document, save_works)
 
     src = Path(a.input)
     out = Path(a.output)
@@ -54,22 +55,55 @@ def cmd_process(a: argparse.Namespace) -> int:
     t0 = time.time()
     print(f"PolkaDot {__version__}: {src.name}, {len(pages)} of {n} pages at {a.dpi} dpi")
     works = process_document(str(src), pages, cfg, progress=None if a.quiet else _progress)
+    out.mkdir(parents=True, exist_ok=True)
+    save_works(works, str(out / "work.pkl"))
+    conf = asdict(cfg)
+    conf.pop("section_overrides", None)
+    summary = _finish(works, out, a, conf, str(src), t0)
+    if not a.keep_pages and not a.cache:
+        import shutil
+        shutil.rmtree(cache, ignore_errors=True)
+        (out / "work.pkl").unlink(missing_ok=True)   # it refers to the page images
+    print(json.dumps(summary, indent=2, default=str))
+    print(f"results written to {out}/ (open {out}/index.html to browse)")
+    return 0
+
+
+def _finish(works, out: Path, a: argparse.Namespace, conf: dict, source: str, t0: float) -> dict:
+    """Document-level linking + export (shared by process / reparse)."""
+    from . import export, postprocess
+    from .pipeline import summarize
+
     ads = [ad for w in works for ad in w.result.ads]
     entries = [e for w in works for e in w.result.entries]
     postprocess.group_ads(ads)
     postprocess.link_ads_to_entries(ads, entries)
     summary = summarize(works)
     summary["seconds"] = round(time.time() - t0, 1)
-    summary["source"] = str(src)
-    conf = asdict(cfg)
-    conf.pop("section_overrides", None)
+    summary["source"] = source
     export.export(works, out, crop_entries=a.crop_entries, overlays=not a.no_overlays,
                   html_index=not a.no_html, summary=summary, config=conf, crop_format=a.crop_format)
-    if not a.keep_pages and not a.cache:
-        import shutil
-        shutil.rmtree(cache, ignore_errors=True)
+    return summary
+
+
+def cmd_reparse(a: argparse.Namespace) -> int:
+    """Re-run section detection, parsing and export without re-OCR."""
+    from .pipeline import load_works, parse_section_map, reparse
+
+    out = Path(a.output)
+    pkl = out / "work.pkl"
+    if not pkl.exists():
+        print(f"error: {pkl} not found - run `process` with --keep-pages or --cache first",
+              file=sys.stderr)
+        return 2
+    t0 = time.time()
+    works = load_works(str(pkl))
+    n = max(w.result.page for w in works) + 1
+    reparse(works, parse_section_map(a.sections, n))
+    prev = json.loads((out / "document.json").read_text()) if (out / "document.json").exists() else {}
+    summary = _finish(works, out, a, prev.get("config", {}),
+                      prev.get("summary", {}).get("source", ""), t0)
     print(json.dumps(summary, indent=2, default=str))
-    print(f"results written to {out}/ (open {out}/index.html to browse)")
     return 0
 
 
@@ -161,9 +195,19 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--no-html", action="store_true", help="skip index.html")
     p.add_argument("--no-deskew", action="store_true")
     p.add_argument("--cache", help="keep rendered page images in this directory")
-    p.add_argument("--keep-pages", action="store_true", help="keep OUT/_pages page images")
+    p.add_argument("--keep-pages", action="store_true",
+                   help="keep OUT/_pages page images and OUT/work.pkl so `reparse` can be used")
     p.add_argument("-q", "--quiet", action="store_true")
     p.set_defaults(func=cmd_process)
+
+    p = sub.add_parser("reparse", help="redo sections / parsing / export of a kept run, without OCR")
+    p.add_argument("output", help="output directory of an earlier `process --keep-pages` run")
+    p.add_argument("--sections", help="force sections (see `process --sections`)")
+    p.add_argument("--crop-entries", choices=["business", "all", "none"], default="business")
+    p.add_argument("--crop-format", choices=["png", "jpg", "webp"], default="png")
+    p.add_argument("--no-overlays", action="store_true")
+    p.add_argument("--no-html", action="store_true")
+    p.set_defaults(func=cmd_reparse)
 
     p = sub.add_parser("layout", help="draw the detected layout of one page")
     p.add_argument("input")
