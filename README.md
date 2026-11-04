@@ -46,7 +46,7 @@ classified by type size. Analysis runs at a fixed working resolution so results
 do not depend on the render DPI.
 
 **Sections.** Each page is classified as `alphabetical` (the general
-directory), `street` (street & avenue guide / householders' directory),
+directory), `telephone` (telephone-book white pages), `street` (street & avenue guide / householders' directory),
 `classified` (buyers' guide / classified business directory), `misc`
 (churches, lodges, schools, officials…), `ads` or `front`, from its content
 and from section titles, smoothed over neighbouring pages. You can override
@@ -70,6 +70,13 @@ fields are extracted per section:
   residents at the same number inherit it; `Vacant` is flagged.
 * *classified* — category headings (`*Floral Designs`), firm name, address and
   the ad cross-reference (`(See right bottom lines)`).
+* *telephone* — mid-century telephone books (white pages):
+  `Hagen Glenn W 3111W45thAv Gary------TUrnr 4-8040` → name, occupation
+  (`arch`, `DDS`…), address, town (abbreviations such as `Hamnd`, `EChgo`,
+  `CalCty` expanded) and exchange-name phone numbers (`TUrnr 4-8040`,
+  `Whiting 2585 W`). Firms set in capitals are `business`; `X also see Y`
+  cross-references are kept as `other`. Their yellow pages are parsed as
+  *classified*.
 * *misc* — `Temple Beth-El—801 Connecticut, Rev Shuman D Hyman rabbi…` → name,
   address, people, under its heading (`Jewish`).
 
@@ -113,7 +120,8 @@ Useful `process` options:
   quality is at least `--min-text-quality` (0.88) and OCRs everything else;
   ads are always OCR'd in `auto` unless `--no-ocr-ads`.
 * `--sections "1-18:ads,41-131:street,132-502:alphabetical,503-:classified"` —
-  force sections when automatic detection guesses wrong (1-based pages).
+  force sections when automatic detection guesses wrong (1-based pages;
+  sections: front, ads, misc, street, alphabetical, classified, telephone).
 * `--crop-entries business|all|none` — which listings get image crops.
 * `-j N` — pages processed in parallel (default: all cores).
 * `--lang eng+deu` — Tesseract languages for foreign-language directories.
@@ -159,6 +167,11 @@ page, stacked-letter and rotated display type, reverse-video ads, street guide,
 general directory, classified business directory and miscellaneous lists.
 The Internet Archive holds hundreds of other Polk directories (search
 *"Polk directory"*); their `…_text.pdf` / original PDFs both work.
+
+Also tested on the **1958 Calumet Region telephone directory** (554 pages,
+<https://archive.org/details/calumet-district-directory-1958-images_202301>):
+four dense columns per page with rules between them, boxed notices and
+yellow pages.
 
 ## Tests
 

@@ -196,7 +196,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--no-deskew", action="store_true")
     p.add_argument("--cache", help="keep rendered page images in this directory")
     p.add_argument("--keep-pages", action="store_true",
-                   help="keep OUT/_pages page images and OUT/work.pkl so `reparse` can be used")
+                   help="keep OUT/_pages page images and OUT/work.pkl so `reparse` can be used "
+                        "(an interrupted run always resumes from OUT/_pages when re-run)")
     p.add_argument("-q", "--quiet", action="store_true")
     p.set_defaults(func=cmd_process)
 

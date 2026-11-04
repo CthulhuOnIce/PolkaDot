@@ -666,13 +666,50 @@ def build_ads(work: PageWork) -> None:
 # --------------------------------------------------------------------------
 
 
+def _checkpoint_path(cfg: PipelineConfig, page: int) -> Optional[str]:
+    if not cfg.cache_dir:
+        return None
+    return os.path.join(cfg.cache_dir, f"page_{page + 1:04d}.work.pkl")
+
+
+def _analyze_and_checkpoint(doc_path: str, page: int, cfg: PipelineConfig) -> PageWork:
+    w = analyze_page(doc_path, page, cfg)
+    cp = _checkpoint_path(cfg, page)
+    if cp:
+        import pickle
+        tmp = cp + ".tmp"
+        with open(tmp, "wb") as fh:
+            pickle.dump(w, fh, protocol=pickle.HIGHEST_PROTOCOL)
+        os.replace(tmp, cp)
+    return w
+
+
 def run_pages(doc_path: str, pages: list[int], cfg: PipelineConfig,
               progress: Optional[Callable[[int, int, int], None]] = None) -> list[PageWork]:
+    """Phase A over ``pages``.  With ``cfg.cache_dir`` set, every analysed
+    page is checkpointed there, and pages already checkpointed by an
+    interrupted earlier run are loaded instead of being analysed again."""
+    import pickle
+
     workers = cfg.workers or (os.cpu_count() or 1)
     works: dict[int, PageWork] = {}
+    todo = []
+    for p in pages:
+        cp = _checkpoint_path(cfg, p)
+        if cp and os.path.exists(cp):
+            try:
+                with open(cp, "rb") as fh:
+                    works[p] = pickle.load(fh)
+                continue
+            except Exception:               # a damaged checkpoint: redo the page
+                pass
+        todo.append(p)
+    if works:
+        log.info("resuming: %d pages already analysed, %d to go", len(works), len(todo))
+    pages = todo
     if workers <= 1 or len(pages) <= 1:
         for i, p in enumerate(pages):
-            works[p] = analyze_page(doc_path, p, cfg)
+            works[p] = _analyze_and_checkpoint(doc_path, p, cfg)
             if progress:
                 progress(i + 1, len(pages), p)
     else:
@@ -683,7 +720,7 @@ def run_pages(doc_path: str, pages: list[int], cfg: PipelineConfig,
         # Windows behaviour)
         ctx = multiprocessing.get_context("spawn")
         with ProcessPoolExecutor(max_workers=workers, mp_context=ctx) as ex:
-            futs = {ex.submit(analyze_page, doc_path, p, cfg): p for p in pages}
+            futs = {ex.submit(_analyze_and_checkpoint, doc_path, p, cfg): p for p in pages}
             done = 0
             for fut in as_completed(futs):
                 p = futs[fut]

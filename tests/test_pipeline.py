@@ -128,3 +128,17 @@ def test_cli_reparse(tmp_path):
     assert main(["reparse", str(out), "--sections", "1:street"]) == 0
     pages = [json.loads(l) for l in open(out / "pages.jsonl")]
     assert pages[0]["section"] == "street"
+
+
+@needs_ocr
+def test_interrupted_run_resumes_from_checkpoints(tmp_path, monkeypatch):
+    from polkadot import pipeline
+    pdf = tmp_path / "synthetic.pdf"
+    synth.make_pdf(pdf, pages=2)
+    cfg = PipelineConfig(dpi=200, workers=1, cache_dir=str(tmp_path / "cache"))
+    pipeline.run_pages(str(pdf), [0], cfg)               # "interrupted" after page 1
+    calls = []
+    real = pipeline.analyze_page
+    monkeypatch.setattr(pipeline, "analyze_page", lambda d, p, c: calls.append(p) or real(d, p, c))
+    works = pipeline.run_pages(str(pdf), [0, 1], cfg)
+    assert calls == [1] and [w.result.page for w in works] == [0, 1]
