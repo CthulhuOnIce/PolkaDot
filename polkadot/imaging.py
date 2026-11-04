@@ -118,10 +118,19 @@ def transform_bbox(b: BBox, m: np.ndarray) -> BBox:
 def paper_mask(gray: np.ndarray, dpi: int) -> np.ndarray:
     """Rough mask of the (light) paper as opposed to dark covers / table."""
     small = cv2.GaussianBlur(gray, (0, 0), dpi / 60)
+    # Paper is "not as dark as a book cover".  (Otsu is no good here: on a
+    # scan with a white scanner bed it splits *paper* from the bed, and
+    # shaded paper near the binding is lost.)
+    bright = float(np.percentile(small, 95))
     t, _ = cv2.threshold(small, 0, 255, cv2.THRESH_BINARY | cv2.THRESH_OTSU)
-    # Otsu between cover and paper; bias a little toward paper so tinted
-    # (yellow) pages are kept.
-    mask = (small > t * 0.85).astype(np.uint8) * 255
+    dark_class = small[small <= t]
+    if dark_class.size and float(np.median(dark_class)) < bright * 0.5:
+        # a genuinely dark surround (book cover, table): Otsu separates it;
+        # bias a little toward paper so tinted (yellow) pages are kept
+        thresh = t * 0.85
+    else:
+        thresh = bright * 0.55
+    mask = (small > thresh).astype(np.uint8) * 255
     k = max(3, int(dpi * 0.05)) | 1
     mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE,
                             cv2.getStructuringElement(cv2.MORPH_RECT, (k, k)))
@@ -236,24 +245,35 @@ def _cut_border_sliver(profile: np.ndarray, lo: int, hi: int, size: int, dpi: in
 def _absorb(colp: np.ndarray, start: int, direction: int, dpi: int, w: int, dark_between) -> int:
     """Extend an edge over nearby glyph columns (unboxed side matter)."""
     thresh = max(1.0, colp.max() * 0.01)
-    gap_max = int(dpi * 0.25)
+    gap_max = int(dpi * 0.32)
     edge = start
+    run_ends = [start]          # edge reached at the end of each block of print
     x = start
     gap = 0
     while 0 < x < w - 1:
         x += direction
         if colp[x] > thresh:
-            if gap > 0 and (dark_between(min(edge, x), max(edge, x))):
-                break
+            if gap > 0:
+                if dark_between(min(edge, x), max(edge, x)):
+                    break
+                run_ends.append(edge)
             edge = x
             gap = 0
         else:
             gap += 1
             if gap > gap_max:
                 break
-    if direction < 0 and edge <= w * 0.06 or direction > 0 and edge >= w * 0.94:
-        return start           # ran into the image border: a sliver
-    return edge
+    run_ends.append(edge)
+
+    def at_border(e: int) -> bool:
+        return (direction < 0 and e <= w * 0.06) or (direction > 0 and e >= w * 0.94)
+
+    # if we ran into the image border, the last block was a sliver of the
+    # facing page / book edge: stop at the block before it
+    for e in reversed(run_ends):
+        if not at_border(e):
+            return e
+    return start
 
 
 def find_content_bbox(gray: np.ndarray, ink: np.ndarray, dpi: int) -> BBox:
@@ -278,7 +298,7 @@ def find_content_bbox(gray: np.ndarray, ink: np.ndarray, dpi: int) -> BBox:
         return BBox(0, 0, w, h)
     cw_, ch_ = st[:, 2].astype(float), st[:, 3].astype(float)
     glyph = ((ch_ >= dpi * 2.5 / 72) & (ch_ <= dpi * 60 / 72) & (cw_ <= dpi * 60 / 72)
-             & (ch_ / np.maximum(cw_, 1) < 6) & (cw_ / np.maximum(ch_, 1) < 6)
+             & (ch_ / np.maximum(cw_, 1) < 6) & (cw_ / np.maximum(ch_, 1) < 40)   # fused words are wide
              & (st[:, 4] >= 0.12 * cw_ * ch_))
     st = st[glyph]
     if len(st) < 5:
@@ -307,10 +327,11 @@ def find_content_bbox(gray: np.ndarray, ink: np.ndarray, dpi: int) -> BBox:
         local = float(np.percentile(colmean[lo_:hi_], 80))
         if colmean[i] > local * 0.72:
             return False
-        off = max(3, int(dpi * 0.03))
-        left_ = colmean[max(0, i - off)]
-        right_ = colmean[min(len(colmean) - 1, i + off)]
-        return min(left_, right_) < local * 0.92
+        # a shadow is dark across a band; a (even double) printed rule is
+        # only dark on a few columns
+        half = max(4, int(dpi * 0.05))
+        win = colmean[max(0, i - half):min(len(colmean), i + half + 1)]
+        return float((win < local * 0.85).mean()) >= 0.6
 
     def main_span(profile: np.ndarray, thresh: float, size: int,
                   reach: float = 0.4, check_dark: bool = False,
@@ -366,12 +387,39 @@ def find_content_bbox(gray: np.ndarray, ink: np.ndarray, dpi: int) -> BBox:
     # 2. walk outwards over the page frame: long vertical rules right next
     #    to the core (a column rule / the inner border of a side ad) and,
     #    one step further, the outer border of that side-ad box.
-    vr = _long_vrules(ink, y0, y1, dpi)
+    # lines hugging the scan's edge are the edge of the leaf / the binding,
+    # not printed rules
+    vr = [r for r in _long_vrules(ink, y0, y1, dpi) if w * 0.06 < r[0] and r[1] < w * 0.94]
     near, far = dpi * 0.25, dpi * 1.25
+    core_mass = float(colp2[x0:x1].sum()) or 1.0
+    grun = _runs(colp2, max(1.0, 0.01 * (y1 - y0)), max_gap=int(dpi * 0.12))
+
+    def column_beyond(edge: int, direction: int) -> Optional[tuple[int, int]]:
+        """A full column of print just past a column rule (dense listings
+        such as telephone books put rules between their columns)."""
+        best = None
+        for a_, b_, mass in grun:
+            gap = (a_ - edge) if direction > 0 else (edge - b_)
+            if not (0 <= gap <= dpi * 0.15) or mass < 0.12 * core_mass:
+                continue
+            if (direction < 0 and a_ <= w * 0.02) or (direction > 0 and b_ >= w * 0.98):
+                continue           # runs off the image: the facing page
+            if dark_between(min(edge, a_ if direction > 0 else b_), max(edge, a_ if direction > 0 else b_)):
+                continue
+            best = (a_, b_)
+        return best
+
     gx0, gx1 = x0, x1
-    left_inner = [r for r in vr if x0 - near <= r[1] <= x0 + dpi * 0.1]
-    if left_inner:
+    for _ in range(8):                                   # walk left
+        left_inner = [r for r in vr if gx0 - near <= r[1] <= gx0 + dpi * 0.1]
+        if not left_inner:
+            gx0 = _absorb(colp2, gx0, -1, dpi, w, dark_between)
+            break
         edge = max(r[0] for r in left_inner)        # the rule nearest the print
+        col = column_beyond(edge, -1)
+        if col is not None:
+            gx0 = col[0]
+            continue
         gx0 = min(gx0, edge)
         outer = [r for r in vr if edge - far <= r[1] < edge - dpi * 0.3
                  and not dark_between(r[1], edge) and r[0] > w * 0.02
@@ -379,11 +427,17 @@ def find_content_bbox(gray: np.ndarray, ink: np.ndarray, dpi: int) -> BBox:
                  and _boxed(ink, r[0], edge, y0, y1)]
         if outer:
             gx0 = min(r[0] for r in outer)
-    else:
-        gx0 = _absorb(colp2, x0, -1, dpi, w, dark_between)
-    right_inner = [r for r in vr if x1 - dpi * 0.1 <= r[0] <= x1 + near]
-    if right_inner:
+        break
+    for _ in range(8):                                   # walk right
+        right_inner = [r for r in vr if gx1 - dpi * 0.1 <= r[0] <= gx1 + near]
+        if not right_inner:
+            gx1 = _absorb(colp2, gx1, +1, dpi, w, dark_between)
+            break
         edge = min(r[1] for r in right_inner)       # the rule nearest the print
+        col = column_beyond(edge, +1)
+        if col is not None:
+            gx1 = col[1]
+            continue
         gx1 = max(gx1, edge)
         outer = [r for r in vr if edge + dpi * 0.3 < r[0] <= edge + far
                  and not dark_between(edge, r[0]) and r[1] < w * 0.98
@@ -391,8 +445,7 @@ def find_content_bbox(gray: np.ndarray, ink: np.ndarray, dpi: int) -> BBox:
                  and _boxed(ink, edge, r[1], y0, y1)]
         if outer:
             gx1 = max(r[1] for r in outer)
-    else:
-        gx1 = _absorb(colp2, x1, +1, dpi, w, dark_between)
+        break
     x0, x1 = gx0, gx1
     # grow a little so the rules framing ads at the edges are included
     pad = int(dpi * 0.07)
@@ -436,6 +489,20 @@ def _segments(mask: np.ndarray, horizontal: Optional[bool] = None,
     return out
 
 
+def _continuity(ink: np.ndarray, seg: BBox, horizontal: bool) -> float:
+    """Share of a candidate rule's length that is actually inked.
+
+    Printed rules are continuous; dot/dash leaders ("Gary------TU 2-1341")
+    and the aligned edges of text stacked line upon line only look like
+    rules after gap bridging, and are inked for a much smaller share."""
+    x0, y0, x1, y1 = seg.to_int()
+    sub = ink[max(0, y0):y1 + 1, max(0, x0):x1 + 1] > 0
+    if sub.size == 0:
+        return 0.0
+    along = sub.any(axis=0) if horizontal else sub.any(axis=1)
+    return float(along.mean())
+
+
 def find_rule_lines(ink: np.ndarray, content: BBox, dpi: int) -> RuleLines:
     """Detect long straight horizontal / vertical rules inside ``content``."""
     cw, ch = content.width, content.height
@@ -458,8 +525,8 @@ def find_rule_lines(ink: np.ndarray, content: BBox, dpi: int) -> RuleLines:
     hmask[solid > 0] = 0
     vmask[solid > 0] = 0
     max_thick = max(4.0, dpi * 0.06)
-    hseg = _segments(hmask, True, max_thick, 15)
-    vseg = _segments(vmask, False, max_thick, 15)
+    hseg = [g for g in _segments(hmask, True, max_thick, 15) if _continuity(ink, g, True) >= 0.9]
+    vseg = [g for g in _segments(vmask, False, max_thick, 15) if _continuity(ink, g, False) >= 0.9]
     hmask2 = np.zeros_like(ink)
     vmask2 = np.zeros_like(ink)
     for s in hseg:
