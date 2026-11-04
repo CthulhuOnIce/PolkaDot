@@ -34,8 +34,6 @@ from .models import BBox, Region, RegionKind
 class LayoutConfig:
     min_column_height: float = 0.22     # fraction of content height
     min_column_width_em: float = 8.0    # in body x-heights
-    side_ad_max_width: float = 0.40     # fraction of content width
-    header_max_lines: int = 2
 
 
 @dataclass
@@ -481,10 +479,8 @@ def _merge_columns(boxes: list[BBox], body_h: float,
     Blocks separated by a horizontal rule are never merged (the rule is what
     separates listings from a strip ad below / above them)."""
     hrules = hrules or []
-    boxes = sorted(boxes, key=lambda b: (b.x0, b.y0))
-    groups: list[BBox] = []
+    groups = sorted(boxes, key=lambda b: (b.x0, b.y0))
     changed = True
-    groups = list(boxes)
     while changed:
         changed = False
         out: list[BBox] = []
@@ -534,15 +530,9 @@ def _split_column(ink: np.ndarray, col: BBox, body_h: float, depth: int = 0) -> 
     generic XY-cut does."""
     if depth > 4 or col.width < body_h * 20:
         return [col]
-    sub = im.crop(ink, col) > 0
-    colp = sub.sum(axis=0)
-    # count rows touched rather than pixels: robust to dotted rules
-    rows_hit = (cv2.dilate(sub.astype(np.uint8), np.ones((3, 1), np.uint8)) > 0)
-    # profile: number of text lines crossing each x (approx by row runs)
-    lines = max(1.0, col.height / (body_h * 2.4))
+    colp = (im.crop(ink, col) > 0).sum(axis=0)
     gaps = _gaps(colp, max(2, int(body_h * 1.5)), noise=max(1, int(col.height * 0.08)))
     gaps = [g for g in gaps if g[0] >= body_h * 10 and col.width - g[1] >= body_h * 10]
-    del rows_hit, lines
     if not gaps:
         return [col]
     # choose the widest gap
@@ -636,7 +626,7 @@ def _drop_slivers(regions: list[Region], rules: im.RuleLines, content: BBox, dpi
 
 
 def _merge_overlapping(regions: list[Region]) -> None:
-    """Merge ad regions of the same kind that overlap each other."""
+    """Merge ad regions that substantially overlap each other."""
     changed = True
     while changed:
         changed = False
@@ -648,8 +638,6 @@ def _merge_overlapping(regions: list[Region]) -> None:
                     continue
                 if inter >= 0.2 * min(a.bbox.area, b.bbox.area):
                     a.bbox = a.bbox.union(b.bbox)
-                    if b.kind is RegionKind.AD_INLINE or a.kind is RegionKind.AD_BOX:
-                        pass
                     regions.remove(b)
                     changed = True
                     break

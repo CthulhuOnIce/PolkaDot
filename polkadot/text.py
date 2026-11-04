@@ -57,11 +57,6 @@ def group_lines(words: list[Word], merge_tol: float = 0.5) -> list[Line]:
     return out
 
 
-def _split_wide_gaps(lines: list[Line], med_h: float) -> list[Line]:
-    """Keep lines intact; hook for splitting accidental cross-column joins."""
-    return lines
-
-
 # --------------------------------------------------------------------------
 # Entry assembly
 # --------------------------------------------------------------------------
@@ -167,8 +162,8 @@ def assemble_entries(lines: list[Line], col: BBox, numbered: bool = False,
             continue
         first = ln.words[0].text
         starts_new = ln.bbox.x0 <= margin + tol
-        if numbered and re.match(r"^\d", first):
-            starts_new = True
+        if numbered and (re.match(r"^\d", first) or re.match(r"^[A-Z]-\d{1,3}$", first)):
+            starts_new = True       # house number, or apartment unit "A-1"
         if numbered and not starts_new:
             # unnumbered resident line aligned with the names column
             if name_margin is not None and abs(ln.bbox.x0 - name_margin) <= tol:

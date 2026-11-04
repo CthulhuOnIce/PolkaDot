@@ -187,52 +187,79 @@ def analyze_page(doc_path: str, page_no: int, cfg: PipelineConfig) -> PageWork:
     sources: set[str] = set()
     frames: dict[str, list] = {}
 
+    out_regions: list[Region] = []
     for r in layout.regions:
-        use_pdf = False
+        is_ad = r.kind.is_ad or r.kind is RegionKind.AD_LABEL
         pdf_words = ocrmod.words_in(pdf_all, r.bbox) if pdf_all else []
-        if cfg.text_source == "pdf":
+        q_pdf = ocrmod.text_quality(pdf_words)
+        enough = len(pdf_words) >= max(3, r.bbox.area / (layout.body_h ** 2 * 400))
+        if cfg.text_source == "pdf" or not have_ocr:
             use_pdf = True
-        elif cfg.text_source == "auto":
-            q = ocrmod.text_quality(pdf_words)
-            enough = len(pdf_words) >= max(3, r.bbox.area / (layout.body_h ** 2 * 400))
-            if r.kind.is_ad or r.kind is RegionKind.AD_LABEL:
-                use_pdf = (not have_ocr) or (not cfg.ocr_ads and q >= cfg.min_text_quality and enough)
-            else:
-                use_pdf = (q >= cfg.min_text_quality and enough) or not have_ocr
-        if use_pdf:
-            words = pdf_words
-            r.lines = group_lines(words)
-            frames[r.id] = [(l.text, l.height, l.bbox.y0, l.bbox.y1, l.bbox.x0, l.conf) for l in r.lines]
-            r.meta["text_source"] = "pdf"
-            r.meta["text_quality"] = round(ocrmod.text_quality(words), 3)
-            sources.add("pdf")
-            if not have_ocr and cfg.text_source == "auto" and r.meta["text_quality"] < cfg.min_text_quality:
-                res.warnings.append(f"{r.id}: low quality text layer and no OCR engine")
-            continue
-        if r.kind.is_ad or r.kind is RegionKind.AD_LABEL:
-            tall = r.bbox.height > r.bbox.width * 1.6
-            rots = (0, 270, 90) if (tall and cfg.ocr.try_rotations) else (0,)
-            words, rot, fwords = _ocr_with_frame(img, r.bbox, cfg, rots, cfg.ocr.ad_psm, False)
-            if cfg.ocr.ad_fallback_psm:
-                # psm 6 assumes one type size and can drop lines set smaller
-                # or larger than the rest; a second segmentation mode fills in
-                alt_w, _, alt_f = _ocr_with_frame(img, r.bbox, cfg, (rot,),
-                                                  cfg.ocr.ad_fallback_psm, False)
-                words, fwords = ocrmod.merge_words(words, fwords, alt_w, alt_f)
-            r.rotation = rot
+        elif cfg.text_source == "ocr":
+            use_pdf = False
+        elif is_ad:
+            use_pdf = not cfg.ocr_ads and q_pdf >= cfg.min_text_quality and enough
         else:
-            H, W = img.shape[:2]
-            box = r.bbox.pad(dpi * 0.03, dpi * 0.01, limit=BBox(0, 0, W, H))
-            words, rot, fwords = _ocr_with_frame(img, box, cfg, (0,), cfg.ocr.text_psm)
-        # group lines in the (possibly rotated) reading frame
-        flines = group_lines(fwords)
-        lookup = {id(fw): pw for fw, pw in zip(fwords, words)}
-        r.lines = [Line([lookup[id(w)] for w in fl.words]) for fl in flines]
-        frames[r.id] = [(fl.text, fl.height, fl.bbox.y0, fl.bbox.y1, fl.bbox.x0, fl.conf)
-                        for fl in flines]
-        r.meta["text_source"] = "ocr"
+            use_pdf = q_pdf >= cfg.min_text_quality and enough
+
+        rot = 0
+        if use_pdf:
+            words = fwords = pdf_words
+            source = "pdf"
+            if not have_ocr and cfg.text_source == "auto" and q_pdf < cfg.min_text_quality:
+                res.warnings.append(f"{r.id}: low quality text layer and no OCR engine")
+        else:
+            if is_ad:
+                tall = r.bbox.height > r.bbox.width * 1.6
+                rots = (0, 270, 90) if (tall and cfg.ocr.try_rotations) else (0,)
+                words, rot, fwords = _ocr_with_frame(img, r.bbox, cfg, rots, cfg.ocr.ad_psm, False)
+                if cfg.ocr.ad_fallback_psm:
+                    # psm 6 assumes one type size and can drop lines set smaller
+                    # or larger than the rest; a second segmentation mode fills in
+                    alt_w, _, alt_f = _ocr_with_frame(img, r.bbox, cfg, (rot,),
+                                                      cfg.ocr.ad_fallback_psm, False)
+                    words, fwords = ocrmod.merge_words(words, fwords, alt_w, alt_f)
+            else:
+                H, W = img.shape[:2]
+                box = r.bbox.pad(dpi * 0.03, dpi * 0.01, limit=BBox(0, 0, W, H))
+                words, rot, fwords = _ocr_with_frame(img, box, cfg, (0,), cfg.ocr.text_psm)
+            source = "ocr"
+            # a so-so text layer can still beat OCR of a poor (low-res) scan
+            if cfg.text_source == "auto" and enough and rot == 0 \
+                    and q_pdf > ocrmod.text_quality(words) + 0.05:
+                words = fwords = pdf_words
+                source = "pdf"
+        r.rotation = rot
+        r.meta["text_source"] = source
         r.meta["text_quality"] = round(ocrmod.text_quality(words), 3)
-        sources.add("ocr")
+        sources.add(source)
+
+        pieces = [(r, words, fwords)]
+        if r.kind is RegionKind.TEXT:
+            # last line of defence against two columns merged into one region
+            parts = split_words_into_columns(words, r.bbox, layout.body_h)
+            if len(parts) > 1:
+                pieces = []
+                for k, (pb, pw) in enumerate(parts):
+                    sub = Region(id=f"{r.id}{'abcdefgh'[k]}", kind=r.kind, bbox=pb,
+                                 rotation=0, column=r.column, meta=dict(r.meta))
+                    sub.meta["split_from"] = r.id
+                    pieces.append((sub, pw, pw))
+        for reg, ws, fws in pieces:
+            # group lines in the (possibly rotated) reading frame
+            flines = group_lines(fws)
+            lookup = {id(fw): pw for fw, pw in zip(fws, ws)}
+            reg.lines = [Line([lookup[id(w)] for w in fl.words]) for fl in flines]
+            frames[reg.id] = [(fl.text, fl.height, fl.bbox.y0, fl.bbox.y1, fl.bbox.x0, fl.conf)
+                              for fl in flines]
+            out_regions.append(reg)
+    # renumber columns left to right after any splits
+    cols = sorted([g for g in out_regions if g.kind is RegionKind.TEXT and g.column >= 0],
+                  key=lambda g: (g.column, g.bbox.x0))
+    for i, g in enumerate(cols):
+        g.column = i
+    layout.regions = out_regions
+    res.regions = out_regions
     res.text_source = "mixed" if len(sources) > 1 else (sources.pop() if sources else "none")
 
     # printed page number from the running head
@@ -257,6 +284,45 @@ def analyze_page(doc_path: str, page_no: int, cfg: PipelineConfig) -> PageWork:
               len(layout.regions))
     return PageWork(res, img_path, matrix.tolist() if matrix is not None else None,
                     skew, feats, frames)
+
+
+def split_words_into_columns(words: list[Word], box: BBox, em: float,
+                             min_lines: int = 6) -> list[tuple[BBox, list[Word]]]:
+    """Split a text region whose words reveal more than one column.
+
+    Looks for a vertical channel that no word crosses, well inside the
+    region, with plenty of words on both sides."""
+    if len(words) < min_lines * 4 or box.width < em * 24:
+        return [(box, words)]
+    x0 = int(box.x0)
+    cover = np.zeros(int(box.width) + 2, np.int32)
+    for w in words:
+        a, b = int(w.bbox.x0) - x0, int(w.bbox.x1) - x0
+        cover[max(0, a):max(0, b)] += 1
+    gaps, i, n = [], 0, len(cover)
+    lo_lim, hi_lim = int(em * 10), n - int(em * 10)
+    while i < n:
+        if cover[i] == 0:
+            j = i
+            while j < n and cover[j] == 0:
+                j += 1
+            if j - i >= em * 0.9 and i > lo_lim and j < hi_lim:
+                gaps.append((i, j))
+            i = j
+        else:
+            i += 1
+    if not gaps:
+        return [(box, words)]
+    a, b = max(gaps, key=lambda g: g[1] - g[0])
+    cut = x0 + (a + b) / 2.0
+    left = [w for w in words if w.bbox.cx < cut]
+    right = [w for w in words if w.bbox.cx >= cut]
+    if len(left) < min_lines * 2 or len(right) < min_lines * 2:
+        return [(box, words)]
+    lb = BBox(box.x0, box.y0, cut, box.y1)
+    rb = BBox(cut, box.y0, box.x1, box.y1)
+    return split_words_into_columns(left, lb, em, min_lines) + \
+        split_words_into_columns(right, rb, em, min_lines)
 
 
 def _ocr_with_frame(img: np.ndarray, box: BBox, cfg: PipelineConfig,
@@ -406,7 +472,7 @@ def build_entries(work: PageWork, ctx: Context) -> None:
                 kind = EntryKind(out["kind"]) if out["kind"] != "other" else EntryKind.STREET
                 if out["kind"] == "person":
                     kind = EntryKind.STREET
-                if fields.get("house_number") and not fields.get("location"):
+                if fields.get("house_number") and not fields.get("location") and not fields.get("unit"):
                     ctx.house_number = fields["house_number"]
                 heading = ctx.street
             elif sec == "classified":

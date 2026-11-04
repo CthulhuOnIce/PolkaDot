@@ -139,3 +139,11 @@ def test_hanging_indent_entries():
 def test_expand_abbrev_does_not_misread_initials():
     assert P.expand_abbrev("clk I S Co") == "clerk Illinois Steel Co"
     assert P.expand_abbrev("formn S M Jones") == "foreman S M Jones"
+
+
+def test_street_guide_apartment_units():
+    f = P.parse_street_line("A-1 McCullough James E", "Adams", "529-539")["fields"]
+    assert f["unit"] == "A-1" and f["address"] == "529-539 Adams Apt A-1"
+    out = P.parse_street_line("B-5 Hall Chester L", "Adams", "529-539")
+    assert out["kind"] == "person" and out["fields"]["name"] == "Hall Chester L"
+    assert P.parse_street_line("{ 616 Kaplan Max, tailor", "Adams", None)["fields"]["house_number"] == "616"

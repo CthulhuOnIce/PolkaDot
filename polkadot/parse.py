@@ -409,10 +409,32 @@ def parse_street_heading(text: str) -> Optional[dict[str, Any]]:
 
 
 def parse_street_line(text: str, street: Optional[str], last_number: Optional[str]) -> dict[str, Any]:
-    t = clean_text(text).lstrip("·.,:;'`-—* ")
+    t = clean_text(text)
+    t = re.sub(r"^[^\w\"]+", "", t)                  # rule fragments, specks
+    t = re.sub(r"^[a-z]\|\s*", "", t)
     # OCR splits house numbers with stray punctuation: "4,32" -> "432"
     t = re.sub(r"^(\d{1,3})[,.'](\d{1,3})\b", r"\1\2", t)
     f: dict[str, Any] = {}
+    unit = re.match(r"^(?P<unit>[A-Z]-\d{1,3})\s+(?P<rest>.*)$", t)
+    if unit:
+        # apartment unit inside the building whose number is in force
+        f["unit"] = unit.group("unit")
+        t = unit.group("rest")
+        if last_number:
+            f["house_number"] = last_number
+        if street and last_number:
+            f["street"] = street
+            f["address"] = f"{last_number} {street} Apt {f['unit']}"
+        rest = t.strip()
+        f["occupant"] = rest
+        if rest.lower().startswith("vacant"):
+            f["vacant"] = True
+            return {"kind": "other", "fields": f}
+        if is_business_name(rest.split(",")[0], person_order=True):
+            f["name"] = rest.split(",")[0].strip()
+            return {"kind": "business", "fields": f, "advertiser": is_caps_name(rest)}
+        f["name"] = rest
+        return {"kind": "person", "fields": f, "advertiser": False}
     m = re.match(r"^(?P<num>\d{1,5}(?:\s?1/2|½)?(?:-\d{1,5})?[A-Za-z]?)\s+(?P<rest>.*)$", t)
     if m:
         num, rest = m.group("num"), m.group("rest")
@@ -440,7 +462,7 @@ def parse_street_line(text: str, street: Optional[str], last_number: Optional[st
         f["vacant"] = True
         return {"kind": "other", "fields": f}
     name_part = rest.split(",")[0]
-    if is_business_name(name_part):
+    if is_business_name(name_part, person_order=True):
         f["name"] = name_part.strip()
         return {"kind": "business", "fields": f, "advertiser": is_caps_name(name_part)}
     # "Williams Charles J, real est" -> person with a trade
