@@ -142,3 +142,29 @@ def test_interrupted_run_resumes_from_checkpoints(tmp_path, monkeypatch):
     monkeypatch.setattr(pipeline, "analyze_page", lambda d, p, c: calls.append(p) or real(d, p, c))
     works = pipeline.run_pages(str(pdf), [0, 1], cfg)
     assert calls == [1] and [w.result.page for w in works] == [0, 1]
+
+
+def test_viewer_wildcard_search_rules():
+    """The index.html search turns ?, # and * into whole-word patterns."""
+    import shutil
+    import subprocess
+    if not shutil.which("node"):
+        pytest.skip("node not installed")
+    from polkadot.export import _SEARCH_JS
+    fn = _SEARCH_JS[_SEARCH_JS.index("function toRegex"):_SEARCH_JS.index("function run")]
+    cases = [
+        ("5?? Broadway", "gary trust bank 575 broadway tel 2", True),
+        ("5?? Broadway", "1523 broadway", False),          # whole words only
+        ("5?? Broadway", "57 broadway", False),             # exactly three characters
+        ("##th av", "store 19th av and virginia", True),
+        ("##th av", "5th av", False),
+        ("Gary * Co", "gary land co office", True),
+        ("Gary * Co", "gary co", True),                     # zero words in between
+        ("Gary*", "gary's restaurant", True),
+        ("1?? W 5th av", "124-130 w 5th av", True),
+    ]
+    script = fn + "const cases = " + json.dumps(cases) + ";\n" + \
+        "for (const [q, t, want] of cases) { const got = toRegex(q).test(t); " \
+        "if (got !== want) { console.log('FAIL', q, '|', t, got); process.exitCode = 1; } }"
+    r = subprocess.run(["node", "-e", script], capture_output=True, text=True)
+    assert r.returncode == 0, r.stdout + r.stderr

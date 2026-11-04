@@ -21,7 +21,7 @@ gary1922/
   crops/ads/          one image per advertisement
   crops/entries/      one image per business / proprietor / advertiser listing
   overlays/           every page with the detected layout drawn on it
-  index.html          searchable contact sheet of all of the above
+  index.html          searchable contact sheet of all of the above (wildcards: see below)
 ```
 
 ## What it understands
@@ -90,6 +90,22 @@ linked to the listings of the same business (`linked_entries` / `linked_ads`).
 
 Every record carries its page, printed page, pixel box *and* PDF-point box on
 the original page, and a crop image path.
+
+## Searching the viewer
+
+`index.html` shows every business and ad with its crop. The search box takes
+plain text (substring match) or wildcards, which match whole words:
+
+| query | finds |
+|---|---|
+| `5?? Broadway` | any three-character house number starting with 5 on Broadway (the 500 block) |
+| `##th av` | `10th av` … `99th av` (`#` = one digit) |
+| `Gary*` | words starting with *Gary* (`Gary`, `Gary's`) |
+| `Gary * Co` | *Gary*, then any words, then *Co* (`Gary Land Co`, `Gary Ice & Coal Co`) |
+
+Searches cover the name, parsed address, phone numbers, category and the
+OCR'd text, ignoring case. The query is kept in the URL (`index.html#q=...`)
+so a search can be bookmarked or shared.
 
 ## Install
 

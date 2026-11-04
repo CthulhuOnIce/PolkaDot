@@ -260,6 +260,55 @@ def export(works: list[PageWork], out: Path, *, crop_entries: str = "business",
     return doc
 
 
+# Search box of index.html.  Plain text is a substring search; with
+# wildcards the query becomes a whole-word regular expression:
+#   ?  one character        5?? Broadway  -> 500-599 Broadway
+#   #  one digit            ##th av       -> 10th av ... 99th av
+#   *  inside a word: any characters (Gary* -> Gary, Gary's);
+#      on its own: any words in between (Gary * Co -> Gary Land Co)
+_SEARCH_JS = r"""
+const q = document.getElementById('q'), count = document.getElementById('count');
+const cards = Array.from(document.querySelectorAll('.card'));
+function toRegex(query) {
+  const esc = s => s.replace(/[.+^${}()|[\]\\\/]/g, '\\$&');
+  // tokens are separated by whitespace; a lone "*" stands for zero or more
+  // whole words between its neighbours
+  let src = '', pendingSep = false;
+  for (const tok of query.trim().split(/\s+/)) {
+    if (tok === '*') { src += (src ? '\\s+' : '') + '(?:\\S+\\s+)*?'; pendingSep = false; continue; }
+    if (pendingSep) src += '\\s+';
+    src += esc(tok).replace(/\?/g, '\\S').replace(/#/g, '\\d').replace(/\*/g, '\\S*');
+    pendingSep = true;
+  }
+  const first = query.trim()[0], last = query.trim().slice(-1);
+  if (/[a-z0-9?#]/i.test(first)) src = '(?<![a-z0-9])' + src;
+  if (/[a-z0-9?#]/i.test(last)) src = src + '(?![a-z0-9])';
+  return new RegExp(src, 'i');
+}
+function run() {
+  const v = q.value.trim();
+  let test;
+  q.classList.remove('bad');
+  if (!v) test = () => true;
+  else if (/[?*#]/.test(v)) {
+    try { const re = toRegex(v); test = t => re.test(t); }
+    catch (e) { q.classList.add('bad'); return; }
+  } else {
+    const needle = v.toLowerCase().split(/\s+/).join(' ');
+    test = t => t.includes(needle);
+  }
+  let n = 0;
+  for (const c of cards) { const ok = test(c.dataset.text); c.style.display = ok ? '' : 'none'; if (ok) n++; }
+  count.textContent = v ? n + ' match' + (n === 1 ? '' : 'es') : '';
+  try { history.replaceState(null, '', v ? '#q=' + encodeURIComponent(v) : location.pathname); } catch (e) {}
+}
+let timer;
+q.addEventListener('input', () => { clearTimeout(timer); timer = setTimeout(run, 120); });
+const m = location.hash.match(/^#q=(.*)$/);
+if (m) { q.value = decodeURIComponent(m[1]); run(); }
+"""
+
+
 def write_html_index(out: Path, rows: list[dict], works: list[PageWork]) -> None:
     """A static, dependency-free page for eyeballing the results."""
     esc = html.escape
@@ -270,8 +319,11 @@ def write_html_index(out: Path, rows: list[dict], works: list[PageWork]) -> None
             f'p.{r["page"]}' + (f' ({r["printed_page"]})' if r.get("printed_page") else ""),
             r.get("section") or "", r.get("kind") or "", r.get("category") or ""] if x)
         details = " · ".join(x for x in [r.get("address") or "", r.get("phones") or ""] if x)
+        haystack = " ".join(x for x in (r.get("name"), r.get("address"), r.get("business_address"),
+                                        r.get("phones"), r.get("category"), r.get("text")) if x)
+        haystack = " ".join(haystack.lower().split())
         cards.append(
-            f'<div class="card {esc(r["source"])}" data-text="{esc((r.get("name") or "") + " " + (r.get("text") or "")).lower()}">'
+            f'<div class="card {esc(r["source"])}" data-text="{esc(haystack)}">'
             f'<div class="img">{img}</div><div class="name">{esc(r.get("name") or "—")}</div>'
             f'<div class="meta">{esc(meta)}</div><div class="det">{esc(details)}</div>'
             f'<details><summary>text</summary><pre>{esc(r.get("text") or "")}</pre></details></div>')
@@ -295,13 +347,15 @@ input{{flex:1;min-width:200px;padding:8px;border:1px solid var(--line);border-ra
 pre{{white-space:pre-wrap;font-size:11px}} nav{{margin:12px 0;display:flex;flex-wrap:wrap;gap:4px}}
 nav a{{font-size:11px;padding:2px 5px;border:1px solid var(--line);border-radius:4px;color:var(--fg);text-decoration:none}}
 nav small{{color:var(--muted);margin-left:3px}}
+.help{{margin:-4px 0 10px;color:var(--muted);font-size:12px}} .help code{{background:var(--card);border:1px solid var(--line);border-radius:3px;padding:0 3px}}
+#count{{color:var(--muted);font-size:12px}} input.bad{{border-color:#c33}}
 </style></head><body>
 <header><strong>PolkaDot</strong><span>{len(rows)} businesses &amp; ads from {len(works)} pages</span>
-<input id="q" placeholder="filter by name / text…"></header>
+<input id="q" placeholder="search, e.g. Smith · 5?? Broadway · ##th av · Gary * Co" autocomplete="off">
+<span id="count"></span></header>
+<p class="help"><code>?</code> any one character · <code>#</code> any one digit ·
+<code>*</code> any characters (on its own: any words) · case-insensitive, whole words when wildcards are used</p>
 <details><summary>Page overlays</summary><nav>{pages}</nav></details>
 <div class="grid" id="grid">{''.join(cards)}</div>
-<script>
-const q=document.getElementById('q');q.addEventListener('input',()=>{{const v=q.value.toLowerCase();
-document.querySelectorAll('.card').forEach(c=>c.style.display=c.dataset.text.includes(v)?'':'none')}});
-</script></body></html>"""
+<script>""" + _SEARCH_JS + """</script></body></html>"""
     (out / "index.html").write_text(doc, encoding="utf-8")
