@@ -60,3 +60,18 @@ def test_trim_outside_frame_drops_facing_page_strip():
     out = im.trim_outside_frame(content, rules, ink, dpi)
     assert 805 <= out.x1 <= 830
     assert out.x0 == content.x0                   # nothing to trim on the left
+
+
+def test_dot_leaders_are_not_rules_but_worn_rules_are():
+    dpi = 200
+    ink = np.zeros((60, 800), np.uint8)
+    ink[10:12, 0:800] = 255                       # clean rule
+    ink[30:32, 0:800] = 255                       # worn rule: a few breaks
+    for x in (150, 400, 610):
+        ink[30:32, x:x + 25] = 0
+    for x in range(0, 800, 7):                    # "------" leader: dash 4, gap 3
+        ink[50:52, x:x + 4] = 255
+    seg = lambda y: BBox(0, y, 800, y + 2)
+    assert im._is_rule(ink, seg(10), True, dpi)
+    assert im._is_rule(ink, seg(30), True, dpi)
+    assert not im._is_rule(ink, seg(50), True, dpi)
