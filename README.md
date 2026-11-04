@@ -132,8 +132,11 @@ pages and picks `polk-1920s` when lines end in residences (`h 123 Adams`),
 shows what it would choose. A profile fixes the section vocabulary (no
 "telephone" pages inside a city directory and vice versa) and how classified
 headings are recognised, and carries its own layout settings
-(`polkadot/profiles.py`). New directory styles should get a profile of their
-own and be tuned there, with a full-book before/after comparison, so that
+(`polkadot/profiles.py`). On the 1958 Calumet telephone book the
+`telephone-1950s` profile raises yellow-page listings with a parsed phone
+number from 59% to 62% and with an address from 63% to 69% over `general`,
+and halves the number of bogus categories. New directory styles should get a
+profile of their own and be tuned there, with a full-book before/after comparison, so that
 changes for one style cannot regress another.
 
 Useful `process` options:
