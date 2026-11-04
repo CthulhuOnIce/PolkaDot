@@ -176,8 +176,10 @@ class _Cutter:
         sub = im.crop(self.ink, box) > 0
         bh = self.body_h
         # ruling lines are the strongest separators
-        for axis in ("y", "x"):
-            rc = self._rule_cuts(box, axis)
+        # (a horizontal rule must cross most of the block - a boxed notice
+        # in one corner must not slice through neighbouring columns)
+        for axis, frac in (("y", 0.65), ("x", 0.5)):
+            rc = self._rule_cuts(box, axis, frac)
             if rc:
                 return axis, rc
         colp = sub.sum(axis=0)
@@ -190,6 +192,10 @@ class _Cutter:
         xg += [g for g in _gaps(colp, max(2, int(bh * 1.8)), noise=max(1, int(box.height * 0.04)))
                if not any(a <= g[0] < b or g[0] <= a < g[1] for a, b in xg)]
         xg = sorted(g for g in xg if g[0] >= bh * 8 and box.width - g[1] >= bh * 8)
+        if not xg and box.width >= bh * 40 and box.height > bh * 30:
+            # dense listings: very narrow but clean gutters between wide columns
+            thin = _gaps(colp, max(2, int(bh * 0.2)), noise=max(1, int(box.height * 0.03)))
+            xg = [g for g in thin if g[0] >= bh * 20 and box.width - g[1] >= bh * 20]
         if xg and box.height > bh * 6:
             score = max(b - a for a, b in xg) / bh
             cands.append((score, "x", [(a + b) // 2 for a, b in xg]))
@@ -542,6 +548,11 @@ def _split_column(ink: np.ndarray, col: BBox, body_h: float, depth: int = 0) -> 
     colp = (im.crop(ink, col) > 0).sum(axis=0)
     gaps = _gaps(colp, max(2, int(body_h * 1.5)), noise=max(1, int(col.height * 0.08)))
     gaps = [g for g in gaps if g[0] >= body_h * 10 and col.width - g[1] >= body_h * 10]
+    if not gaps and col.width >= body_h * 40:
+        # dense listings (telephone books) set wide columns with a very
+        # narrow gutter: accept a thin but nearly clean channel
+        thin = _gaps(colp, max(2, int(body_h * 0.2)), noise=max(1, int(col.height * 0.03)))
+        gaps = [g for g in thin if g[0] >= body_h * 20 and col.width - g[1] >= body_h * 20]
     if not gaps:
         return [col]
     # choose the widest gap

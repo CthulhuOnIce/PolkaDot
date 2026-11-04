@@ -187,7 +187,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--lang", default="eng", help="tesseract language(s), e.g. 'eng+deu'")
     p.add_argument("-j", "--workers", type=int, default=0, help="parallel pages (default: CPU count)")
     p.add_argument("--sections", help="force sections, e.g. '1-18:ads,41-131:street,132-502:alphabetical,503-:classified' "
-                                      "(sections: front, ads, misc, street, alphabetical, classified)")
+                                      "(sections: front, ads, misc, street, alphabetical, classified, telephone)")
     p.add_argument("--crop-entries", choices=["business", "all", "none"], default="business",
                    help="which listings get an image crop (default: businesses / proprietors / advertisers)")
     p.add_argument("--crop-format", choices=["png", "jpg", "webp"], default="png")

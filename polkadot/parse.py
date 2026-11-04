@@ -88,6 +88,9 @@ PHONE_RE = re.compile(
     r"((?:\d[\d\-]{1,7}(?:-?[A-Z])?)(?:\s*(?:and|&|,|or)\s*\d[\d\-]{1,7}(?:-?[A-Z])?)*)",
     re.IGNORECASE)
 
+# a 1950s exchange-name number ("TU 2-1341", "WEstmor 2-1975") somewhere in the text
+EXCHANGE_HINT_RE = re.compile(r"\b[A-Z][A-Za-z]{0,7}\s?\d-\d{4}\b")
+
 SEE_RE = re.compile(r"\(\s*See\s+([^)]*)\)?", re.IGNORECASE)
 PAREN_RE = re.compile(r"\(([^)]*)\)")
 
@@ -145,7 +148,7 @@ def clean_text(t: str) -> str:
 
 
 def find_phones(text: str) -> list[str]:
-    out = []
+    out = [p for p in find_exchange_phones(text)] if EXCHANGE_HINT_RE.search(text) else []
     for m in PHONE_RE.finditer(text):
         for p in re.split(r"\s*(?:and|&|,|or)\s*", m.group(1)):
             p = p.strip(" -")
@@ -490,6 +493,11 @@ def clean_heading(text: str) -> str:
 
 def parse_classified(text: str, category: Optional[str]) -> dict[str, Any]:
     t = clean_text(text)
+    phones_pb = find_exchange_phones(t)
+    if phones_pb:
+        # telephone yellow pages: "NAME address------TU 3-9425"
+        t = EXCHANGE_PHONE_RE.sub(" ", t)
+        t = LEADER_RE.sub(" ", t).strip(" -~")
     body, refs = _strip_see(t)
     f: dict[str, Any] = {}
     if category:
@@ -514,7 +522,7 @@ def parse_classified(text: str, category: Optional[str]) -> dict[str, Any]:
     f["name"] = (name or "").strip(" ,.")
     if addr:
         f["address"] = addr.strip(" ,.")
-    phones = find_phones(t)
+    phones = phones_pb or find_phones(t)
     if phones:
         f["phones"] = phones
     return {"kind": "business", "fields": f, "advertiser": is_caps_name(f["name"]) or bool(refs)}
@@ -642,3 +650,121 @@ def ad_fields(lines: list[tuple], full_text: str) -> dict[str, Any]:
         name = firm[0]
     f["business_name"] = name.strip(" ,.-—")
     return f
+
+
+# --------------------------------------------------------------------------
+# Telephone directories (white pages)
+# --------------------------------------------------------------------------
+
+# "TUrnr 4-8040", "WEstmor 2-1975", "TU 2-1341", "GRnit 4-2440", "Whiting 2585 W"
+EXCHANGE_PHONE_RE = re.compile(
+    r"(?P<exch>\b[A-Z][A-Za-z]{1,8})\.?\s*(?P<num>\d\s?[-–.]\s?\d{4})(?:\s*(?P<party>[A-Z])\b)?")
+LEADER_RE = re.compile(r"\s*[-–—~_.·]{3,}\s*")
+
+TOWNS = {
+    "gary": "Gary", "hamnd": "Hammond", "hammond": "Hammond", "echgo": "East Chicago",
+    "e chgo": "East Chicago", "calcty": "Calumet City", "lansng": "Lansing",
+    "highld": "Highland", "munstr": "Munster", "grifth": "Griffith", "whting": "Whiting",
+    "whiting": "Whiting", "burnhm": "Burnham", "dyer": "Dyer", "ross": "Ross",
+    "schrvl": "Schererville", "sherer": "Schererville", "newelt": "New Elliott",
+    "mrlvl": "Merrillville", "chgo": "Chicago", "hobart": "Hobart", "crwnpt": "Crown Point",
+}
+
+
+def find_exchange_phones(text: str) -> list[str]:
+    out = []
+    for m in EXCHANGE_PHONE_RE.finditer(text):
+        num = re.sub(r"\s", "", m.group("num")).replace("–", "-").replace(".", "-")
+        p = f"{m.group('exch')} {num}" + (f" {m.group('party')}" if m.group("party") else "")
+        if p not in out:
+            out.append(p)
+    return out
+
+
+def _split_house_number(addr: str) -> str:
+    """'3111W45thAv' -> '3111 W45thAv' (phone books glue number and street)."""
+    return re.sub(r"^(\d+(?:\s?1/2)?)(?!st|nd|rd|th|d[A-Z]|d\b)(?=[A-Za-z])", r"\1 ", addr.strip())
+
+
+def parse_telephone(text: str, surname_ctx: Optional[str] = None) -> dict[str, Any]:
+    """``Hagen John B 3440Pierce Gary--------TUrnr 4-3265``.
+
+    Fields: name, occupation (when given, e.g. ``arch``, ``DDS``), address,
+    town, phone(s).  Lines in capitals are usually firms; ``X also see Y``
+    cross-references are returned as kind "other"."""
+    t = clean_text(text)
+    t = re.sub(r"(?<=[A-Za-z])[!|]", "l", t)            # OCR: "TEmp!" -> "TEmpl"
+    t = re.sub(r"\b(Whi?tn?g)\s*-\s*(\d{4}(?:-[A-Z])?)", r"Whiting \2", t)
+    # stray characters bleeding in from the page edge / gutter
+    t = re.sub(r"^(?:[^A-Za-z\"“”']+\s+|[a-z§}{|]\s+)+(?=[A-Z])", "", t)
+    f: dict[str, Any] = {}
+    if re.search(r"\balso\s+see\b", t, re.IGNORECASE):
+        f["see_also"] = re.split(r"\balso\s+see\b", t, flags=re.IGNORECASE)[1].strip()
+        f["name"] = re.split(r"\balso\s+see\b", t, flags=re.IGNORECASE)[0].strip()
+        return {"kind": "other", "fields": f, "advertiser": False}
+    phones = find_exchange_phones(t)
+    m = EXCHANGE_PHONE_RE.search(t)
+    if not phones:
+        # small-town exchanges: "------Whiting 2585 W"
+        m = re.search(r"(?P<exch>\b[A-Z][a-z]+)\s+(?P<num>\d{3,4})(?:\s*-?\s*(?P<party>[A-Z]))?\s*$", t)
+        if m and LEADER_RE.search(t[: m.start()] + "---"):
+            phones = [" ".join(x for x in (m.group("exch"), m.group("num"), m.group("party")) if x)]
+        else:
+            m = None
+    if phones:
+        f["phones"] = phones
+    # everything before the first phone number (and its leader dots)
+    head = t[: m.start()] if m else t
+    head = LEADER_RE.split(head)[0].strip(" -–~")
+    # town: the last word, when it is a known town abbreviation
+    words = head.split()
+    if words:
+        key = words[-1].lower().strip(".,")
+        two = " ".join(words[-2:]).lower() if len(words) >= 2 else ""
+        if two in TOWNS:
+            f["town"] = TOWNS[two]
+            words = words[:-2]
+        elif key in TOWNS:
+            f["town"] = TOWNS[key]
+            words = words[:-1]
+    # a town glued to the street ("7537ChestnutHamnd")
+    if words and "town" not in f:
+        for key, town in TOWNS.items():
+            k = key.replace(" ", "")
+            last = words[-1]
+            if len(last) > len(k) + 2 and last.lower().endswith(k) and last[-len(k)].isupper():
+                words[-1] = last[: -len(k)]
+                f["town"] = town
+                break
+    # address: from the first token that starts with a digit (or "rear")
+    ai = next((i for i, w in enumerate(words) if i > 0 and re.match(r"^\d", w)), None)
+    if ai is not None:
+        f["address"] = _split_house_number(" ".join(words[ai:]))
+        name_words = words[:ai]
+    else:
+        name_words = words
+    if surname_ctx and name_words and re.match(r"""^["“”']$""", name_words[0]):
+        name_words = [surname_ctx] + name_words[1:]
+    name = " ".join(name_words).strip(" ,")
+    # trailing lower-case words before the address are an occupation ("arch", "phys")
+    occ = []
+    while name_words and (name_words[-1].islower() or name_words[-1] in {"DDS", "MD", "DC", "DO"}) \
+            and len(name_words) > 2:
+        occ.insert(0, name_words.pop())
+    if occ:
+        f["occupation"] = " ".join(occ)
+        f["occupation_expanded"] = expand_abbrev(f["occupation"])
+        name = " ".join(name_words)
+    f["name"] = name
+    toks = name.split()
+    if toks and not is_caps_name(name):
+        f["surname"] = toks[0]
+        if len(toks) > 1:
+            f["given_name"] = " ".join(toks[1:])
+    if is_business_name(name, person_order=not is_caps_name(name)) or is_caps_name(name):
+        kind = "business"
+    elif occ:
+        kind = "proprietor"
+    else:
+        kind = "person"
+    return {"kind": kind, "fields": f, "advertiser": is_caps_name(name)}

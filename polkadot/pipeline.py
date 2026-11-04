@@ -36,7 +36,7 @@ from .text import assemble_entries, group_lines, join_lines
 
 log = logging.getLogger("polkadot")
 
-SECTIONS = ("front", "ads", "misc", "street", "alphabetical", "classified")
+SECTIONS = ("front", "ads", "misc", "street", "alphabetical", "classified", "telephone")
 
 
 @dataclass
@@ -400,6 +400,8 @@ _MARKERS = [
 
 
 _TITLED_RE = re.compile(r"""^[*•"“”'‘’]?\s*[A-Z][a-z]+(?:[ —-]+(?:[A-Z][a-z]+|and|of|&))*$""")
+# a line ending in a telephone-book number: "...Gary------TUrnr 4-8040"
+_PHONE_END_RE = re.compile(r"[A-Z][A-Za-z]{0,7}\.?\s?\d\s?-\s?\d{4}\s*[A-Z]?\W*$")
 _DASH_RE = re.compile(r"[A-Za-z.)]\s?—\s?\d")
 
 
@@ -437,13 +439,20 @@ def section_features(res: PageResult) -> dict:
     return {"n_lines": n, "ad_frac": ad_area / max(1.0, content_area),
             "num_start": num_start / max(1, n), "res": res_hits / max(1, n),
             "see": see / max(1, n), "star": star, "titled": titled / max(1, n),
-            "dash": dash / max(1, n), "markers": markers}
+            "dash": dash / max(1, n), "markers": markers,
+            "phone": sum(1 for t in texts if _PHONE_END_RE.search(t)) / max(1, n)}
 
 
 def guess_section(f: dict) -> tuple[str, float]:
     """Return (section, confidence 0..1) from one page's features."""
     if f["n_lines"] < 8:
         return ("ads" if f["ad_frac"] > 0.4 else "front"), 0.6
+    if f.get("phone", 0.0) > 0.3:
+        # a telephone book: white pages unless category headings / ad
+        # references mark it as the yellow pages
+        if f.get("titled", 0.0) > 0.03 or f["see"] > 0.02:
+            return "classified", 0.7
+        return "telephone", min(1.0, f["phone"] * 1.5)
     if f["num_start"] > 0.35:
         return "street", min(1.0, f["num_start"] * 1.6)
     if f["res"] > 0.18:
@@ -501,7 +510,7 @@ def assign_sections(works: list[PageWork], overrides: dict[int, str]) -> None:
     # real sections run for dozens of pages: a short island of another
     # listing section between two long stretches of the same one is a
     # misreading (advertising pages and explicit overrides excepted)
-    listing = ("alphabetical", "street", "classified", "misc")
+    listing = ("alphabetical", "street", "classified", "misc", "telephone")
     runs: list[list[int]] = []
     for i, w in enumerate(works):
         if runs and works[runs[-1][0]].result.section == w.result.section:
@@ -549,7 +558,7 @@ def build_entries(work: PageWork, ctx: Context) -> None:
     sec = res.section
     if ctx.section != sec:
         ctx.section = sec
-        if sec != "alphabetical":
+        if sec not in ("alphabetical", "telephone"):
             ctx.surname = None
         ctx.house_number = None
     n = 0
@@ -557,7 +566,7 @@ def build_entries(work: PageWork, ctx: Context) -> None:
                           key=lambda r: (r.column if r.column >= 0 else 99, r.bbox.x0, r.bbox.y0))
     for r in text_regions:
         raws = assemble_entries(r.lines, r.bbox, numbered=(sec == "street"),
-                                heading_style="caps" if sec in ("street", "alphabetical") else "any")
+                                heading_style="caps" if sec in ("street", "alphabetical", "telephone") else "any")
         for raw in raws:
             text = raw.text
             if not text:
@@ -603,6 +612,13 @@ def build_entries(work: PageWork, ctx: Context) -> None:
                 fields, advertiser = out["fields"], out.get("advertiser", False)
                 kind = EntryKind.BUSINESS
                 heading = ctx.category
+            elif sec == "telephone":
+                out = P.parse_telephone(text, ctx.surname)
+                fields, advertiser = out["fields"], out.get("advertiser", False)
+                kind = EntryKind(out["kind"])
+                if fields.get("surname") and kind is EntryKind.PERSON:
+                    ctx.surname = fields["surname"]
+                heading = ctx.surname
             elif sec == "misc":
                 out = P.parse_misc(text, ctx.category)
                 fields, advertiser = out["fields"], out.get("advertiser", False)

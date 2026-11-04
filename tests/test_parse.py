@@ -147,3 +147,19 @@ def test_street_guide_apartment_units():
     out = P.parse_street_line("B-5 Hall Chester L", "Adams", "529-539")
     assert out["kind"] == "person" and out["fields"]["name"] == "Hall Chester L"
     assert P.parse_street_line("{ 616 Kaplan Max, tailor", "Adams", None)["fields"]["house_number"] == "616"
+
+
+def test_telephone_listings():
+    f = P.parse_telephone("Hagen Glenn W 3111W45thAv Gary------TUrnr 4-8040")["fields"]
+    assert f["name"] == "Hagen Glenn W" and f["address"] == "3111 W45thAv"
+    assert f["town"] == "Gary" and f["phones"] == ["TUrnr 4-8040"]
+    out = P.parse_telephone("Hagerstrom Chas T arch 226Bridge Gary--TUrnr 5-3178")
+    assert out["kind"] == "proprietor" and out["fields"]["occupation"] == "arch"
+    out = P.parse_telephone("COCA-COLA BOTLG WKS 10thAv&Colfx Gary-TU 6-1573 10th&Colfx Gary ----WE 1-8020")
+    assert out["kind"] == "business" and out["fields"]["phones"] == ["TU 6-1573", "WE 1-8020"]
+    assert P.parse_telephone("HAGERTY also see HAGGERTY")["kind"] == "other"
+    f = P.parse_telephone("5 Cofran IrvinG 7537ChestnutHamnd -----Tlidn 4-1616")["fields"]
+    assert f["name"] == "Cofran IrvinG" and f["town"] == "Hammond" and f["address"] == "7537 Chestnut"
+    assert P.parse_telephone("Hajduch A groc 1719, 119th....Whitng-1734")["fields"]["phones"] == ["Whiting 1734"]
+    f = P.parse_classified("KAISER BROS SERVICE STA 2250 W 15th ------TU 2-7871", "Service Stations")["fields"]
+    assert f["name"] == "KAISER BROS SERVICE STA" and f["phones"] == ["TU 2-7871"]
