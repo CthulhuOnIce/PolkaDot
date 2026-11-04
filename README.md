@@ -136,7 +136,11 @@ uv sync
 uv run polkadot process DIRECTORY.pdf -o out/
 ```
 
-With pip instead: `pip install .` (Python ≥ 3.10).
+`uv sync` already installs PolkaDot into `.venv` in editable mode: changes
+to the source take effect immediately. (Don't use `uv run pip install -e .`:
+uv environments have no pip, so that runs your system pip instead.)
+
+With pip instead: `pip install -e .` inside a virtualenv (Python ≥ 3.10).
 
 ## Usage
 

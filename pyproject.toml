@@ -28,13 +28,16 @@ Repository = "https://github.com/CthulhuOnIce/PolkaDot"
 dev = ["pytest>=7"]
 
 [build-system]
-requires = ["uv_build>=0.11.0,<0.12"]
-build-backend = "uv_build"
+# hatchling: pure Python, PEP 660 editable installs with any pip >= 21.3,
+# and fully supported by uv (`uv sync`, `uv build`)
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
 
-[tool.uv.build-backend]
-# flat layout: the package lives at ./polkadot, not ./src/polkadot
-module-name = "polkadot"
-module-root = ""
+[tool.hatch.build.targets.wheel]
+packages = ["polkadot"]
+
+[tool.hatch.build.targets.sdist]
+include = ["polkadot", "tests", "README.md", "LICENSE", "uv.lock", ".python-version"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
