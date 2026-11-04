@@ -4,6 +4,7 @@
     polkadot reparse  out/ --sections ...         re-parse a kept run without OCR
     polkadot layout   DIRECTORY.pdf -p 42 -o x.png  draw the segmentation of one page
     polkadot info     DIRECTORY.pdf               page count / text-layer quality
+    polkadot profiles [DIRECTORY.pdf]             list profiles / detect the right one
     polkadot strip-text IN.pdf OUT.pdf            make an image-only copy (for testing OCR)
 """
 
@@ -33,6 +34,7 @@ def cmd_process(a: argparse.Namespace) -> int:
 
     from . import export, postprocess
     from .ocr import OcrConfig, tesseract_available
+    from .profiles import get_profile
     from .pipeline import (PipelineConfig, parse_page_spec, parse_section_map,
                            process_document, save_works)
 
@@ -46,11 +48,21 @@ def cmd_process(a: argparse.Namespace) -> int:
             print("error: --text ocr needs the `tesseract` binary on PATH", file=sys.stderr)
             return 2
         print("warning: tesseract not found - using the PDF text layer only", file=sys.stderr)
+    profile = a.profile
+    if profile == "auto":
+        from .profiles import detect_profile
+        print("choosing a profile from sample pages ...")
+        det = detect_profile(str(src))
+        profile = det.profile
+        print(f"profile: {profile} ({det.reason}; pages {det.pages})")
+    else:
+        print(f"profile: {profile}")
     cache = Path(a.cache) if a.cache else out / "_pages"
     cfg = PipelineConfig(
         dpi=a.dpi, text_source=a.text, workers=a.workers, deskew=not a.no_deskew,
         min_text_quality=a.min_text_quality, ocr_ads=not a.no_ocr_ads,
-        section_overrides=parse_section_map(a.sections, n),
+        section_overrides=parse_section_map(a.sections, n), profile=profile,
+        layout=get_profile(profile).layout,
         ocr=OcrConfig(lang=a.lang), cache_dir=str(cache))
     t0 = time.time()
     print(f"PolkaDot {__version__}: {src.name}, {len(pages)} of {n} pages at {a.dpi} dpi")
@@ -99,8 +111,13 @@ def cmd_reparse(a: argparse.Namespace) -> int:
     t0 = time.time()
     works = load_works(str(pkl))
     n = max(w.result.page for w in works) + 1
-    reparse(works, parse_section_map(a.sections, n))
     prev = json.loads((out / "document.json").read_text()) if (out / "document.json").exists() else {}
+    profile = a.profile or prev.get("config", {}).get("profile", "general")
+    if profile == "auto":
+        profile = prev.get("config", {}).get("profile", "general")
+    print(f"profile: {profile} (layout from the original run is kept)")
+    reparse(works, parse_section_map(a.sections, n), profile)
+    prev.setdefault("config", {})["profile"] = profile
     summary = _finish(works, out, a, prev.get("config", {}),
                       prev.get("summary", {}).get("source", ""), t0)
     print(json.dumps(summary, indent=2, default=str))
@@ -127,6 +144,17 @@ def cmd_layout(a: argparse.Namespace) -> int:
     for r in lay.regions:
         print(f"{r.id:>10} {r.kind.value:<10} {r.bbox.to_int()}")
     print(f"skew {skew}°, body x-height {lay.body_h:.1f}px -> {a.output}")
+    return 0
+
+
+def cmd_profiles(a: argparse.Namespace) -> int:
+    from .profiles import PROFILES, detect_profile
+
+    for p in PROFILES.values():
+        print(f"{p.name:16s} {p.description}")
+    if a.input:
+        det = detect_profile(a.input)
+        print(f"\n{a.input}: {det.profile} ({det.reason})\n  scores {det.scores}, sampled pages {det.pages}")
     return 0
 
 
@@ -185,6 +213,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--no-ocr-ads", action="store_true",
                    help="auto mode: use a good text layer for ads too instead of OCR")
     p.add_argument("--lang", default="eng", help="tesseract language(s), e.g. 'eng+deu'")
+    p.add_argument("--profile", choices=["auto", "general", "polk-1920s", "telephone-1950s"],
+                   default="auto",
+                   help="directory style (default: auto - sample pages and pick one, "
+                        "falling back to 'general'); see `polkadot profiles`")
     p.add_argument("-j", "--workers", type=int, default=0, help="parallel pages (default: CPU count)")
     p.add_argument("--sections", help="force sections, e.g. '1-18:ads,41-131:street,132-502:alphabetical,503-:classified' "
                                       "(sections: front, ads, misc, street, alphabetical, classified, telephone)")
@@ -203,6 +235,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("reparse", help="redo sections / parsing / export of a kept run, without OCR")
     p.add_argument("output", help="output directory of an earlier `process --keep-pages` run")
+    p.add_argument("--profile", choices=["general", "polk-1920s", "telephone-1950s"],
+                   help="parse with another profile's section / heading rules "
+                        "(default: the profile of the original run)")
     p.add_argument("--sections", help="force sections (see `process --sections`)")
     p.add_argument("--crop-entries", choices=["business", "all", "none"], default="business")
     p.add_argument("--crop-format", choices=["png", "jpg", "webp"], default="png")
@@ -216,6 +251,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("-o", "--output", default="layout.png")
     p.add_argument("--dpi", type=int, default=200)
     p.set_defaults(func=cmd_layout)
+
+    p = sub.add_parser("profiles", help="list directory-style profiles, or detect one for a PDF")
+    p.add_argument("input", nargs="?", help="a directory PDF to run auto-detection on")
+    p.set_defaults(func=cmd_profiles)
 
     p = sub.add_parser("info", help="show page count and text-layer quality")
     p.add_argument("input")

@@ -503,7 +503,8 @@ def _continuity(ink: np.ndarray, seg: BBox, horizontal: bool) -> float:
     return float(along.mean())
 
 
-def _is_rule(ink: np.ndarray, seg: BBox, horizontal: bool, dpi: int) -> bool:
+def _is_rule(ink: np.ndarray, seg: BBox, horizontal: bool, dpi: int,
+             solid: float = 0.9, min_cont: float = 0.65, max_gaps_per_inch: float = 12.0) -> bool:
     """A printed rule is (nearly) continuous, or at worst broken in a few
     places by wear; a dot/dash leader breaks every few pixels."""
     x0, y0, x1, y1 = seg.to_int()
@@ -512,15 +513,20 @@ def _is_rule(ink: np.ndarray, seg: BBox, horizontal: bool, dpi: int) -> bool:
         return False
     along = sub.any(axis=0) if horizontal else sub.any(axis=1)
     cont = float(along.mean())
-    if cont >= 0.9:
+    if cont >= solid:
         return True
     gaps = int(((~along[1:]) & along[:-1]).sum())
     per_inch = gaps / max(1e-6, len(along) / dpi)
-    return cont >= 0.65 and per_inch < 12
+    return cont >= min_cont and per_inch < max_gaps_per_inch
 
 
-def find_rule_lines(ink: np.ndarray, content: BBox, dpi: int) -> RuleLines:
-    """Detect long straight horizontal / vertical rules inside ``content``."""
+def find_rule_lines(ink: np.ndarray, content: BBox, dpi: int,
+                    rule_params: Optional[dict] = None) -> RuleLines:
+    """Detect long straight horizontal / vertical rules inside ``content``.
+
+    ``rule_params`` (solid, min_cont, max_gaps_per_inch) tune how worn a
+    rule may be before it is taken for a dot/dash leader (see _is_rule)."""
+    rp = rule_params or {}
     cw, ch = content.width, content.height
     hk = max(int(dpi * 0.6), int(cw * 0.10))
     vk = max(int(dpi * 0.6), int(ch * 0.06))
@@ -541,8 +547,8 @@ def find_rule_lines(ink: np.ndarray, content: BBox, dpi: int) -> RuleLines:
     hmask[solid > 0] = 0
     vmask[solid > 0] = 0
     max_thick = max(4.0, dpi * 0.06)
-    hseg = [g for g in _segments(hmask, True, max_thick, 15) if _is_rule(ink, g, True, dpi)]
-    vseg = [g for g in _segments(vmask, False, max_thick, 15) if _is_rule(ink, g, False, dpi)]
+    hseg = [g for g in _segments(hmask, True, max_thick, 15) if _is_rule(ink, g, True, dpi, **rp)]
+    vseg = [g for g in _segments(vmask, False, max_thick, 15) if _is_rule(ink, g, False, dpi, **rp)]
     hmask2 = np.zeros_like(ink)
     vmask2 = np.zeros_like(ink)
     for s in hseg:

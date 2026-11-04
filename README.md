@@ -114,8 +114,31 @@ polkadot layout DIRECTORY.pdf -p 42 -o p42.png # check the segmentation of one p
 polkadot strip-text IN.pdf OUT.pdf -p 1-20     # image-only copy, to test the OCR path
 ```
 
+### Profiles
+
+Directory styles pull layout and parsing in different directions, so
+settings are grouped into profiles:
+
+| profile | for |
+|---|---|
+| `general` | all-round settings that adapt page by page (the fallback) |
+| `polk-1920s` | R. L. Polk-style city directories, c. 1890s–1940s |
+| `telephone-1950s` | mid-century telephone books (white + yellow pages) |
+
+`--profile auto` (the default) reads a strip of listings from a few sample
+pages and picks `polk-1920s` when lines end in residences (`h 123 Adams`),
+`telephone-1950s` when they end in exchange numbers (`TUrnr 4-8040`), and
+`general` when the evidence is unclear. `polkadot profiles DIRECTORY.pdf`
+shows what it would choose. A profile fixes the section vocabulary (no
+"telephone" pages inside a city directory and vice versa) and how classified
+headings are recognised, and carries its own layout settings
+(`polkadot/profiles.py`). New directory styles should get a profile of their
+own and be tuned there, with a full-book before/after comparison, so that
+changes for one style cannot regress another.
+
 Useful `process` options:
 
+* `--profile auto|general|polk-1920s|telephone-1950s` — directory style (see above).
 * `--text auto|pdf|ocr` — `auto` (default) uses the PDF's text layer where its
   quality is at least `--min-text-quality` (0.88) and OCRs everything else;
   ads are always OCR'd in `auto` unless `--no-ocr-ads`.
@@ -151,6 +174,7 @@ export.export(works, "out/")
 | `polkadot/ocr.py` | Tesseract wrapper (rotations, inversion, multi-scale, rule erasing) and PDF text-layer reader |
 | `polkadot/text.py` | words → lines → hanging-indent entries, heading detection |
 | `polkadot/parse.py` | field grammars for each section, addresses, phones, ad fields, abbreviations |
+| `polkadot/profiles.py` | directory-style profiles and auto-detection |
 | `polkadot/pipeline.py` | per-page analysis (parallel), section detection, entry / ad building, `reparse` |
 | `polkadot/postprocess.py` | repeated-ad grouping, ad ↔ listing links, consolidated business index |
 | `polkadot/export.py` | CSV / JSON / crops / overlays / `index.html` |

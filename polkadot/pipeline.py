@@ -21,7 +21,7 @@ from collections import Counter
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, Iterable, Optional
+from typing import TYPE_CHECKING, Callable, Iterable, Optional
 
 import cv2
 import numpy as np
@@ -33,6 +33,14 @@ from .layout import LayoutConfig, analyze_layout
 from .models import (Ad, BBox, Entry, EntryKind, Line, PageResult, Region,
                      RegionKind, Word)
 from .text import assemble_entries, group_lines, join_lines
+
+if TYPE_CHECKING:  # pragma: no cover
+    from .profiles import Profile
+
+
+def get_profile(name: str) -> "Profile":
+    from .profiles import get_profile as _get
+    return _get(name)
 
 log = logging.getLogger("polkadot")
 
@@ -48,6 +56,7 @@ class PipelineConfig:
     deskew: bool = True
     workers: int = 0                   # 0 = os.cpu_count()
     section_overrides: dict[int, str] = field(default_factory=dict)
+    profile: str = "general"           # see polkadot.profiles ("auto" is resolved by the CLI)
     ocr: ocrmod.OcrConfig = field(default_factory=ocrmod.OcrConfig)
     layout: LayoutConfig = field(default_factory=LayoutConfig)
     cache_dir: Optional[str] = None    # where deskewed page images are kept
@@ -472,7 +481,8 @@ def guess_section(f: dict) -> tuple[str, float]:
     return "misc", 0.2
 
 
-def assign_sections(works: list[PageWork], overrides: dict[int, str]) -> None:
+def assign_sections(works: list[PageWork], overrides: dict[int, str],
+                    profile: Optional["Profile"] = None) -> None:
     """Per-page guesses smoothed with document context.
 
     Directories are organised in long contiguous sections.  A weakly
@@ -486,7 +496,10 @@ def assign_sections(works: list[PageWork], overrides: dict[int, str]) -> None:
         if p in overrides:
             guesses.append((overrides[p], 2.0))
         else:
-            guesses.append(guess_section(w.features))
+            sec, conf = guess_section(w.features)
+            if profile is not None:
+                sec = profile.map_section(sec)
+            guesses.append((sec, conf))
     n = len(works)
     strong = [g[1] >= 0.5 and g[0] not in ("ads", "front") for g in guesses]
 
@@ -554,7 +567,7 @@ class Context:
     section: Optional[str] = None
 
 
-def build_entries(work: PageWork, ctx: Context) -> None:
+def build_entries(work: PageWork, ctx: Context, profile: Optional["Profile"] = None) -> None:
     res = work.result
     sec = res.section
     if ctx.section != sec:
@@ -568,8 +581,12 @@ def build_entries(work: PageWork, ctx: Context) -> None:
     for r in text_regions:
         if sec in ("street", "alphabetical", "telephone"):
             style = "caps"
-        elif sec == "classified" and work.features.get("phone", 0.0) > 0.2:
-            style = "marked"          # telephone-book yellow pages
+        elif sec == "classified":
+            mode = profile.classified_headings if profile is not None else "auto"
+            if mode == "auto":
+                # telephone-book yellow pages mark their headings "▶ Heading"
+                mode = "marked" if work.features.get("phone", 0.0) > 0.2 else "any"
+            style = mode
         else:
             style = "any"
         raws = assemble_entries(r.lines, r.bbox, numbered=(sec == "street"), heading_style=style)
@@ -768,29 +785,36 @@ def process_document(doc_path: str, pages: Optional[Iterable[int]] = None,
     import pymupdf
 
     cfg = cfg or PipelineConfig()
+    profile = get_profile(cfg.profile)
+    if cfg.layout == LayoutConfig():
+        # no explicit layout settings: use the profile's
+        from dataclasses import replace as _replace
+        cfg = _replace(cfg, layout=profile.layout)
     with pymupdf.open(doc_path) as doc:
         n = doc.page_count
     page_list = list(pages) if pages is not None else list(range(n))
     works = run_pages(str(doc_path), page_list, cfg, progress)
-    assign_sections(works, cfg.section_overrides)
+    assign_sections(works, cfg.section_overrides, profile)
     ctx = Context()
     for w in works:
-        build_entries(w, ctx)
+        build_entries(w, ctx, profile)
         build_ads(w)
     return works
 
 
-def reparse(works: list[PageWork], overrides: Optional[dict[int, str]] = None) -> list[PageWork]:
+def reparse(works: list[PageWork], overrides: Optional[dict[int, str]] = None,
+            profile: str = "general") -> list[PageWork]:
     """Re-run phase B (sections, entries, ads) on already analysed pages."""
     for w in works:
         w.result.entries = []
         w.result.ads = []
         w.result.section = ""
         w.features = section_features(w.result)    # pick up detector changes
-    assign_sections(works, overrides or {})
+    prof = get_profile(profile)
+    assign_sections(works, overrides or {}, prof)
     ctx = Context()
     for w in works:
-        build_entries(w, ctx)
+        build_entries(w, ctx, prof)
         build_ads(w)
     return works
 

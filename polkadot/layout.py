@@ -32,8 +32,28 @@ from .models import BBox, Region, RegionKind
 
 @dataclass
 class LayoutConfig:
+    """Layout settings.  Defaults are the ``general`` profile; see
+    :mod:`polkadot.profiles` for the per-style presets."""
     min_column_height: float = 0.22     # fraction of content height
     min_column_width_em: float = 8.0    # in body x-heights
+    # rules vs dot/dash leaders: a candidate rule inked over >= rule_solid of
+    # its length is a rule; otherwise it must be inked >= rule_min_cont and
+    # broken fewer than rule_max_gaps_per_inch times per inch (wear, not dots)
+    rule_solid: float = 0.9
+    rule_min_cont: float = 0.65
+    rule_max_gaps_per_inch: float = 12.0
+    # accept very narrow (2-3 px) gutters between wide, dense columns
+    # (telephone books set four columns almost edge to edge)
+    dense_gutters: bool = True
+    # largest share of a body column's ink that may be display-size type
+    body_large_frac: float = 0.2
+    # second chance for a column the same size as an accepted one but full
+    # of bold listings / headed by a boxed ad
+    twin_columns: bool = True
+
+    def rule_params(self) -> dict:
+        return {"solid": self.rule_solid, "min_cont": self.rule_min_cont,
+                "max_gaps_per_inch": self.rule_max_gaps_per_inch}
 
 
 @dataclass
@@ -130,7 +150,9 @@ def text_orientation(mask: np.ndarray, box: BBox, body_h: float) -> str:
 
 
 class _Cutter:
-    def __init__(self, ink: np.ndarray, rules: im.RuleLines, body_h: float, dpi: int):
+    def __init__(self, ink: np.ndarray, rules: im.RuleLines, body_h: float, dpi: int,
+                 dense_gutters: bool = True):
+        self.dense_gutters = dense_gutters
         self.ink = ink
         self.rules = rules
         self.body_h = body_h
@@ -192,7 +214,7 @@ class _Cutter:
         xg += [g for g in _gaps(colp, max(2, int(bh * 1.8)), noise=max(1, int(box.height * 0.04)))
                if not any(a <= g[0] < b or g[0] <= a < g[1] for a, b in xg)]
         xg = sorted(g for g in xg if g[0] >= bh * 8 and box.width - g[1] >= bh * 8)
-        if not xg and box.width >= bh * 40 and box.height > bh * 30:
+        if not xg and self.dense_gutters and box.width >= bh * 40 and box.height > bh * 30:
             # dense listings: very narrow but clean gutters between wide columns
             thin = _gaps(colp, max(2, int(bh * 0.2)), noise=max(1, int(box.height * 0.03)))
             xg = [g for g in thin if g[0] >= bh * 20 and box.width - g[1] >= bh * 20]
@@ -263,10 +285,10 @@ def _analyze(img: np.ndarray, dpi: int, page_no: int, cfg: LayoutConfig,
 
     H, W = ink.shape
     window = content.pad(dpi * 0.2, limit=BBox(0, 0, W, H))
-    rules = im.find_rule_lines(ink, window, dpi)
+    rules = im.find_rule_lines(ink, window, dpi, cfg.rule_params())
     content = im.expand_to_rules(content, rules, dpi).intersect(window)
     content = im.trim_outside_frame(content, rules, ink, dpi)
-    rules = im.find_rule_lines(ink, content.pad(2, limit=BBox(0, 0, W, H)), dpi)
+    rules = im.find_rule_lines(ink, content.pad(2, limit=BBox(0, 0, W, H)), dpi, cfg.rule_params())
     rule_mask = cv2.dilate(rules.combined, np.ones((3, 3), np.uint8))
     text_ink = cv2.bitwise_and(ink, cv2.bitwise_not(rule_mask))
     # restrict to content and drop speckle
@@ -320,7 +342,7 @@ def _analyze(img: np.ndarray, dpi: int, page_no: int, cfg: LayoutConfig,
         work[max(0, y0):y1, max(0, x0):x1] = 0
 
     # ---- 2. XY-cut the rest ---------------------------------------------
-    cutter = _Cutter(work, rules, body_h, dpi)
+    cutter = _Cutter(work, rules, body_h, dpi, cfg.dense_gutters)
     cutter.run(content)
     leaves: list[Leaf] = []
     for b in cutter.leaves:
@@ -345,13 +367,13 @@ def _analyze(img: np.ndarray, dpi: int, page_no: int, cfg: LayoutConfig,
         st = im.block_stats(comps, c, body_h, work)
         # listing columns are dense, uniform small type; a tall ad set in
         # mixed sizes (common on advertising pages) is not
-        if st.large_frac > 0.2 or st.body_frac < 0.75:
+        if st.large_frac > cfg.body_large_frac or st.body_frac < 0.75:
             continue
         body_cols.append(c)
     # second chance: a column of the same size as an accepted one, set in
     # small type but with many bold / capitalised listings (paid entries
     # such as "PHOENIX FIRE INSURANCE CO") is a listing column too
-    for c in columns:
+    for c in columns if cfg.twin_columns else []:
         if c in body_cols or c.height < min_h or c.width < min_w:
             continue
         # (a boxed ad at the head of the column may shorten it)
@@ -400,7 +422,7 @@ def _analyze(img: np.ndarray, dpi: int, page_no: int, cfg: LayoutConfig,
         layout.regions = regions
         return layout
 
-    body_cols = [piece for c in body_cols for piece in _split_column(work, c, body_h)]
+    body_cols = [piece for c in body_cols for piece in _split_column(work, c, body_h, 0, cfg.dense_gutters)]
     # a much narrower "column" at the outer edge of the body is a side ad
     # set in small type (e.g. a transfer company's list of services)
     if len(body_cols) >= 3:
@@ -559,7 +581,8 @@ def _merge_columns(boxes: list[BBox], body_h: float,
     return groups
 
 
-def _split_column(ink: np.ndarray, col: BBox, body_h: float, depth: int = 0) -> list[BBox]:
+def _split_column(ink: np.ndarray, col: BBox, body_h: float, depth: int = 0,
+                  dense_gutters: bool = True) -> list[BBox]:
     """Split a text block that really holds several columns.
 
     Inside known listing text we can afford to tolerate more noise in the
@@ -570,7 +593,7 @@ def _split_column(ink: np.ndarray, col: BBox, body_h: float, depth: int = 0) -> 
     colp = (im.crop(ink, col) > 0).sum(axis=0)
     gaps = _gaps(colp, max(2, int(body_h * 1.5)), noise=max(1, int(col.height * 0.08)))
     gaps = [g for g in gaps if g[0] >= body_h * 10 and col.width - g[1] >= body_h * 10]
-    if not gaps and col.width >= body_h * 40:
+    if not gaps and dense_gutters and col.width >= body_h * 40:
         # dense listings (telephone books) set wide columns with a very
         # narrow gutter: accept a thin but nearly clean channel
         thin = _gaps(colp, max(2, int(body_h * 0.2)), noise=max(1, int(col.height * 0.03)))
@@ -585,7 +608,7 @@ def _split_column(ink: np.ndarray, col: BBox, body_h: float, depth: int = 0) -> 
     for part in (left, right):
         t = _ink_bbox(ink, part)
         if t is not None:
-            out.extend(_split_column(ink, t, body_h, depth + 1))
+            out.extend(_split_column(ink, t, body_h, depth + 1, dense_gutters))
     return out
 
 
