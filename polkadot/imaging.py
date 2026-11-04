@@ -803,6 +803,11 @@ class BlockStats:
 
 def block_stats(comps: Components, box: BBox, body_h: float, ink: np.ndarray) -> BlockStats:
     c = comps.inside(box)
+    if len(c):
+        # a component larger than the block itself (the residue of a page-wide
+        # frame of rules, whose centre happens to fall here) is not part of it
+        fits = (c.boxes[:, 2] <= box.width * 1.15 + 2) & (c.boxes[:, 3] <= box.height * 1.15 + 2)
+        c = c.select(fits)
     x0, y0, x1, y1 = box.to_int()
     area = max(1, (x1 - x0) * (y1 - y0))
     density = float((ink[y0:y1, x0:x1] > 0).sum()) / area
@@ -816,7 +821,9 @@ def block_stats(comps: Components, box: BBox, body_h: float, ink: np.ndarray) ->
         return BlockStats(0, 0.0, 0.0, 0.0, 0.0, density)
     hg, wg, ag = h[glyph], w[glyph], c.areas[glyph].astype(float)
     body = (hg <= body_h * 2.3) & (wg <= body_h * 4.0)
-    large = (hg > body_h * 2.8) | (wg > body_h * 8)
+    # large type is *tall*; a wide but body-height blob is a word set in
+    # heavy type whose letters have fused (bold listings), not display type
+    large = (hg > body_h * 2.8) | ((wg > body_h * 8) & (hg > body_h * 1.6))
     tall = (hg > wg * 2.5) & (hg > body_h * 1.2)
     return BlockStats(
         n=n,

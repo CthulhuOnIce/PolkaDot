@@ -354,12 +354,14 @@ def _analyze(img: np.ndarray, dpi: int, page_no: int, cfg: LayoutConfig,
     for c in columns:
         if c in body_cols or c.height < min_h or c.width < min_w:
             continue
-        twin = any(abs(c.width - b.width) <= 0.15 * b.width and abs(c.height - b.height) <= 0.15 * b.height
-                   and c.y_overlap(b) >= 0.8 * min(c.height, b.height) for b in body_cols)
+        # (a boxed ad at the head of the column may shorten it)
+        twin = any(abs(c.width - b.width) <= 0.15 * b.width and c.height >= 0.5 * b.height
+                   and c.y0 >= b.y0 - body_h * 3 and c.y1 <= b.y1 + body_h * 3
+                   and c.x_overlap(b) == 0 for b in body_cols)
         if not twin:
             continue
         st = im.block_stats(comps, c, body_h, work)
-        if st.large_frac <= 0.4 and st.body_frac >= 0.9:
+        if st.large_frac <= 0.5 and st.body_frac >= 0.85:
             body_cols.append(c)
     # body columns must not be absurdly narrow compared to the widest one
     if body_cols:
@@ -461,6 +463,13 @@ def _analyze(img: np.ndarray, dpi: int, page_no: int, cfg: LayoutConfig,
         else:
             # attach to the column it overlaps most
             best = min(body_cols, key=lambda c: (-c.x_overlap(b), c.gap_to(b)), default=None)
+            if best is not None and b.width > best.width * 1.3:
+                # spans several columns: a running head, or display matter
+                if header is None and b.height <= body_h * 3.2 and b.y0 <= body.y0 + body_h * 6:
+                    header = b
+                else:
+                    inline_ads.append(b)
+                continue
             if best is not None and (best.x_overlap(b) > 0 or best.gap_to(b) < body_h * 3):
                 i = body_cols.index(best)
                 body_cols[i] = best.union(b)
