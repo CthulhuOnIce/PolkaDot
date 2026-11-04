@@ -1,38 +1,40 @@
-[build-system]
-requires = ["setuptools>=68", "wheel"]
-build-backend = "setuptools.build_meta"
-
 [project]
 name = "polkadot"
 version = "0.1.0"
 description = "Tools for ripping apart scanned city directories (R. L. Polk & Co. and similar) into structured business data and cropped image references."
 readme = "README.md"
 requires-python = ">=3.10"
-license = { text = "AGPL-3.0-or-later" }
+license = "AGPL-3.0-or-later"
+license-files = ["LICENSE"]
 classifiers = [
-    "License :: OSI Approved :: GNU Affero General Public License v3 or later (AGPLv3+)",
     "Programming Language :: Python :: 3",
     "Topic :: Scientific/Engineering :: Image Recognition",
 ]
 dependencies = [
-    "pymupdf>=1.23",
+    "pymupdf>=1.24.3,<2",   # 2.x hard-requires onnxruntime + AI layout add-ons we do not use
     "numpy>=1.24",
     "opencv-python-headless>=4.8",
     "pillow>=10.1",
     "pytesseract>=0.3.10",
 ]
 
-[project.optional-dependencies]
-dev = ["pytest>=7"]
-
 [project.scripts]
 polkadot = "polkadot.cli:main"
 
-[tool.setuptools.packages.find]
-include = ["polkadot*"]
+[project.urls]
+Repository = "https://github.com/CthulhuOnIce/PolkaDot"
 
-[tool.setuptools.package-data]
-polkadot = ["data/*.json"]
+[dependency-groups]
+dev = ["pytest>=7"]
+
+[build-system]
+requires = ["uv_build>=0.11.0,<0.12"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+# flat layout: the package lives at ./polkadot, not ./src/polkadot
+module-name = "polkadot"
+module-root = ""
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

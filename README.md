@@ -109,14 +109,34 @@ so a search can be bookmarked or shared.
 
 ## Install
 
+PolkaDot is a [uv](https://docs.astral.sh/uv/) project (any PEP 517 tool such
+as pip works too). OCR also needs the
+[Tesseract](https://github.com/tesseract-ocr/tesseract) binary
+(`apt install tesseract-ocr`, `brew install tesseract`, or the UB Mannheim
+Windows installer); without it PolkaDot still runs on PDFs that already have
+a text layer.
+
+Run it without installing anything permanently:
+
 ```
-pip install -e .            # Python ≥ 3.10
+uvx --from git+https://github.com/CthulhuOnIce/PolkaDot polkadot process DIRECTORY.pdf -o out/
 ```
 
-OCR needs the [Tesseract](https://github.com/tesseract-ocr/tesseract) binary
-(`apt install tesseract-ocr`, `brew install tesseract`, or the UB Mannheim
-Windows installer). Without it PolkaDot still runs on PDFs that already have a
-text layer.
+Install the `polkadot` command for your user:
+
+```
+uv tool install git+https://github.com/CthulhuOnIce/PolkaDot
+```
+
+Work on a checkout (creates `.venv` from the pinned `uv.lock`):
+
+```
+git clone https://github.com/CthulhuOnIce/PolkaDot && cd PolkaDot
+uv sync
+uv run polkadot process DIRECTORY.pdf -o out/
+```
+
+With pip instead: `pip install .` (Python ≥ 3.10).
 
 ## Usage
 
@@ -219,12 +239,14 @@ yellow pages.
 ## Tests
 
 ```
-pip install -e .[dev]
-pytest
+uv run pytest
 ```
 
 The tests build synthetic directory pages (no scans needed). OCR tests are
-skipped when Tesseract is not installed.
+skipped when Tesseract is not installed, and the viewer-search test when
+Node.js is not. CI runs them on Python 3.10, 3.12 and 3.13
+(`uv run --locked`, so a stale `uv.lock` fails the build; refresh it with
+`uv lock` after changing dependencies).
 
 ## Limits and tuning
 
