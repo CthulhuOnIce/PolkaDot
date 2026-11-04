@@ -189,6 +189,17 @@ skipped when Tesseract is not installed.
   bleed-through give noisier fields. Render at 300 dpi (default) for scans.
 * Field parsing follows Polk conventions; other publishers' abbreviations can
   be added to `polkadot/data/abbreviations.json`.
+* Telephone-book yellow pages are the hardest layout: listings, bold display
+  listings and boxed ads share the columns. Ads are cropped reliably;
+  roughly half of yellow-page listings get a parsed address, and a few pages
+  still have a column read as advertising.
+* Long runs: every analysed page is checkpointed in `OUT/_pages`, so an
+  interrupted `process` resumes when re-run with the same arguments. A
+  554-page telephone book takes about 50 minutes on 4 cores at 300 dpi,
+  a 558-page 1922 Polk directory about 20.
+* When changing heuristics, re-run a whole book with `--keep-pages` and
+  compare `entries.csv` / `pages.jsonl` against a previous run: layout fixes
+  for one directory style can easily break another.
 * Layout heuristics live in `polkadot/layout.py` (`LayoutConfig`) and
   `polkadot/imaging.py`. `polkadot layout` and the `overlays/` folder show
   what was detected; please open an issue with a page image when it is wrong.
