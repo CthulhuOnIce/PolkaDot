@@ -118,3 +118,133 @@ def link_ads_to_entries(ads: list[Ad], entries: Iterable[Entry]) -> None:
                 e.fields.setdefault("ad_ids", [])
                 if ad.id not in e.fields["ad_ids"]:
                     e.fields["ad_ids"].append(ad.id)
+
+
+# --------------------------------------------------------------------------
+# Consolidated business index
+# --------------------------------------------------------------------------
+
+
+def _addr_key(a: str) -> str:
+    a = norm_name(a or "")
+    m = re.match(r"(\d+)\s+(\w+)", a)
+    return f"{m.group(1)} {m.group(2)}" if m else ""
+
+
+def business_key(name: str, kind: str, address: str = "") -> str:
+    toks = sorted(name_tokens(name))
+    if not toks:
+        return ""
+    key = " ".join(toks)
+    if kind == "proprietor":
+        # people share names; a proprietor is identified by name + address
+        key += " @ " + _addr_key(address)
+    return key
+
+
+def consolidate(entries: Iterable[Entry], ads: list[Ad]) -> list[dict]:
+    """One record per distinct business across sections, pages and ads."""
+    parent: dict[str, str] = {}
+
+    def find(x: str) -> str:
+        while parent.setdefault(x, x) != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    def union(a: str, b: str) -> None:
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            parent[rb] = ra
+
+    items: dict[str, list] = defaultdict(list)
+    ent_key: dict[str, str] = {}
+    for e in entries:
+        if e.kind not in (EntryKind.BUSINESS, EntryKind.PROPRIETOR) and not e.advertiser:
+            continue
+        name = e.fields.get("name") or ""
+        addr = e.fields.get("address") or e.fields.get("business_address") or ""
+        k = business_key(name, e.kind.value, addr)
+        if not k:
+            continue
+        find(k)
+        ent_key[e.id] = k
+        items[k].append(("entry", e))
+    for ad in ads:
+        name = ad.business_name or ad.meta.get("group_business_name") or ""
+        k = business_key(name, "business")
+        linked = [ent_key[i] for i in ad.meta.get("linked_entries", []) if i in ent_key]
+        if not k and not linked:
+            k = "ad " + (ad.meta.get("group") or ad.id)
+        k = k or linked[0]
+        find(k)
+        for lk in linked[:3]:
+            union(lk, k)
+        if ad.meta.get("group"):
+            union("group " + ad.meta["group"], k)
+        items[k].append(("ad", ad))
+
+    groups: dict[str, list] = defaultdict(list)
+    for k, its in items.items():
+        groups[find(k)].extend(its)
+
+    out = []
+    for gi, (k, its) in enumerate(sorted(groups.items(), key=lambda kv: kv[0])):
+        names, cats, addrs, phones, pages, secs, kinds, crops = (
+            [], [], [], [], set(), set(), set(), [])
+        entry_ids, ad_ids = [], []
+        for typ, obj in its:
+            if typ == "entry":
+                f = obj.fields
+                names.append(f.get("name") or "")
+                if f.get("category"):
+                    cats.append(f["category"])
+                for a in (f.get("address"), f.get("business_address")):
+                    if a:
+                        addrs.append(a)
+                phones += f.get("phones", []) or []
+                pages.add(obj.page + 1)
+                secs.add(obj.section)
+                kinds.add(obj.kind.value)
+                entry_ids.append(obj.id)
+                if obj.crop:
+                    crops.append(obj.crop)
+            else:
+                if obj.business_name:
+                    names.append(obj.business_name)
+                if obj.category:
+                    cats.append(obj.category)
+                addrs += obj.addresses
+                phones += obj.phones
+                pages.add(obj.page + 1)
+                kinds.add("ad")
+                ad_ids.append(obj.id)
+                if obj.crop:
+                    crops.append(obj.crop)
+
+        def ranked(xs: list[str]) -> list[str]:
+            c: dict[str, int] = defaultdict(int)
+            for x in xs:
+                c[x.strip(" ,.")] += 1
+            return [x for x, _ in sorted(c.items(), key=lambda kv: (-kv[1], kv[0])) if x]
+
+        nm = ranked(names)
+        # prefer a mixed-case reading for display when one exists
+        display = next((n for n in nm if not n.isupper()), nm[0] if nm else "")
+        out.append({
+            "business_id": f"B{gi:05d}",
+            "name": display,
+            "name_variants": nm[:6],
+            "kinds": sorted(kinds),
+            "categories": ranked(cats)[:8],
+            "addresses": ranked(addrs)[:6],
+            "phones": ranked(phones)[:6],
+            "sections": sorted(secs),
+            "pages": sorted(pages),
+            "n_listings": len(entry_ids),
+            "n_ads": len(ad_ids),
+            "entry_ids": entry_ids,
+            "ad_ids": ad_ids,
+            "crops": crops[:12],
+        })
+    return out

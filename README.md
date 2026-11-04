@@ -16,6 +16,7 @@ gary1922/
   businesses.csv      every firm, proprietor and advertiser (listings + ads), with crops
   entries.csv         every parsed listing: residents, firms, street-guide lines, …
   ads.csv             every advertisement occurrence (grouped when an ad repeats)
+  business_index.csv  one row per distinct business: its listings in every section + its ads
   pages.jsonl         full per-page detail: regions, lines, entries, ads, coordinates
   crops/ads/          one image per advertisement
   crops/entries/      one image per business / proprietor / advertiser listing

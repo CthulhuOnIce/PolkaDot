@@ -9,6 +9,7 @@ Output layout::
       businesses.csv         businesses, proprietors and advertisers (listings + ads)
       businesses.jsonl       same, as JSON lines
       ads.csv                every advertisement occurrence
+      business_index.csv     one row per distinct business: all its listings + ads merged
       crops/ads/…            one image per advertisement
       crops/entries/…        one image per business / proprietor listing
       overlays/…             page images with the detected layout drawn on
@@ -237,10 +238,21 @@ def export(works: list[PageWork], out: Path, *, crop_entries: str = "business",
         for r in biz_rows:
             fh.write(json.dumps(to_jsonable(r), ensure_ascii=False) + "\n")
 
+    from .postprocess import consolidate
+    index = consolidate([e for w in works for e in w.result.entries],
+                        [a for w in works for a in w.result.ads])
+    _write_csv(out / "business_index.csv", [
+        {k: ("; ".join(map(str, v)) if isinstance(v, list) else v) for k, v in r.items()}
+        for r in index])
+    with open(out / "business_index.jsonl", "w", encoding="utf-8") as fh:
+        for r in index:
+            fh.write(json.dumps(to_jsonable(r), ensure_ascii=False) + "\n")
+
     doc = {"summary": summary or {}, "config": config or {},
            "files": {"pages": "pages.jsonl", "entries": "entries.csv", "ads": "ads.csv",
-                     "businesses": "businesses.csv"},
-           "counts": {"entries": len(entry_rows), "businesses": len(biz_rows), "ads": len(ad_rows)}}
+                     "businesses": "businesses.csv", "business_index": "business_index.csv"},
+           "counts": {"entries": len(entry_rows), "businesses": len(biz_rows), "ads": len(ad_rows),
+                      "distinct_businesses": len(index)}}
     with open(out / "document.json", "w", encoding="utf-8") as fh:
         json.dump(to_jsonable(doc), fh, indent=2, ensure_ascii=False)
     if html_index:

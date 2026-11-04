@@ -81,7 +81,7 @@ def test_cli_process_writes_outputs(tmp_path):
                "--sections", "1-2:alphabetical"])
     assert rc == 0
     for f in ["document.json", "pages.jsonl", "entries.csv", "ads.csv", "businesses.csv",
-              "businesses.jsonl", "index.html"]:
+              "businesses.jsonl", "business_index.csv", "index.html"]:
         assert (out / f).exists(), f
     ads = list(csv.DictReader(open(out / "ads.csv")))
     assert len(ads) >= 6
@@ -96,6 +96,9 @@ def test_cli_process_writes_outputs(tmp_path):
     assert listing and all((out / b["crop"]).exists() for b in listing if b["crop"])
     pages = [json.loads(l) for l in open(out / "pages.jsonl")]
     assert len(pages) == 2 and pages[0]["regions"]
+    index = list(csv.DictReader(open(out / "business_index.csv")))
+    acme_idx = [r for r in index if "ACME" in r["name"].upper()]
+    assert len(acme_idx) == 1 and acme_idx[0]["n_ads"] == "2"
     bb = pages[0]["ads"][0]["bbox_pdf"]
     assert 0 <= bb[0] < bb[2] <= 396 + 1
 
