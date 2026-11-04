@@ -300,6 +300,7 @@ def _analyze(img: np.ndarray, dpi: int, page_no: int, cfg: LayoutConfig,
             continue          # nested inside an ad already found
         ad_cells.append(c.bbox)
 
+    ruled_cells = list(ad_cells)
     for b in im.find_solid_panels(ink, content, dpi):
         if b.area > content.area * 0.5:
             continue
@@ -370,7 +371,7 @@ def _analyze(img: np.ndarray, dpi: int, page_no: int, cfg: LayoutConfig,
             for g in _cluster_keep_cells(
                     [b for b in ad_cells if pnl.overlap_ratio(b) > 0 and b.overlap_ratio(pnl) > 0.5]
                     + [l.bbox for l in leaves if l.bbox.overlap_ratio(pnl) > 0.5],
-                    ad_cells, body_h, body_h * 4.0):
+                    ruled_cells, body_h, body_h * 4.0):
                 g = g.intersect(pnl) if not g.intersect(pnl).is_empty() else g
                 if min(g.width, g.height) >= body_h * 1.2:
                     add(RegionKind.AD_BOX, g)
@@ -437,7 +438,7 @@ def _analyze(img: np.ndarray, dpi: int, page_no: int, cfg: LayoutConfig,
             if best is not None and (best.x_overlap(b) > 0 or best.gap_to(b) < body_h * 3):
                 i = body_cols.index(best)
                 body_cols[i] = best.union(b)
-    inline_ads = _cluster_keep_cells(inline_ads, ad_cells, body_h)
+    inline_ads = _cluster_keep_cells(inline_ads, ruled_cells, body_h)
 
     # outside: group by margin zone
     zone_items: dict[RegionKind, list[BBox]] = {}
@@ -446,7 +447,7 @@ def _analyze(img: np.ndarray, dpi: int, page_no: int, cfg: LayoutConfig,
         zone_items.setdefault(kind, []).append(b)
     for kind, bs in zone_items.items():
         gap = body_h * (6.0 if kind is RegionKind.AD_SIDE else 2.5)
-        for g in _cluster_keep_cells(bs, ad_cells, body_h, gap):
+        for g in _cluster_keep_cells(bs, ruled_cells, body_h, gap):
             if min(g.width, g.height) < max(body_h * 1.5, dpi * 0.18) or g.area < (body_h * 3) ** 2:
                 continue
             add(kind, g)

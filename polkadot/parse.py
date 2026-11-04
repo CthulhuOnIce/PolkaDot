@@ -251,11 +251,11 @@ def parse_alphabetical(text: str, surname_ctx: Optional[str] = None) -> dict[str
         return {"kind": "other", "fields": f}
 
     # ditto mark -> repeat the surname in force
-    if re.match(r'^(?:"|\'\'|,,|“|”)$', toks[0]) and surname_ctx:
+    if re.match(r"""^(?:"|''|,,|“|”|‘|’|'|`|„)$""", toks[0]) and surname_ctx:
         toks[0] = surname_ctx
         f["ditto"] = True
-    elif toks[0].startswith('"') and len(toks[0]) > 1 and surname_ctx:
-        toks = [surname_ctx, toks[0].lstrip('"')] + toks[1:]
+    elif re.match(r"""^["'`‘’“”„]+[A-Z]""", toks[0]) and surname_ctx:
+        toks = [surname_ctx, toks[0].lstrip("\"'`‘’“”„")] + toks[1:]
         f["ditto"] = True
 
     # ---- residence marker (last h/r/bds that is followed by an address) --
@@ -376,7 +376,9 @@ def parse_alphabetical(text: str, surname_ctx: Optional[str] = None) -> dict[str
             f["employer"] = tail_str
             f["employer_expanded"] = expand_abbrev(tail_str)
     if kind == "person" and f.get("occupation", "").lower() in PROPRIETOR_OCCUPATIONS \
-            and "employer" not in f and f.get("residence_address", "").startswith("same"):
+            and "employer" not in f:
+        # a grocer / physician / tailor ... with no employer runs their own
+        # business (at the residence when no business address is given)
         kind = "proprietor"
     phones = find_phones(body)
     if phones:
@@ -407,7 +409,9 @@ def parse_street_heading(text: str) -> Optional[dict[str, Any]]:
 
 
 def parse_street_line(text: str, street: Optional[str], last_number: Optional[str]) -> dict[str, Any]:
-    t = clean_text(text)
+    t = clean_text(text).lstrip("·.,:;'`-—* ")
+    # OCR splits house numbers with stray punctuation: "4,32" -> "432"
+    t = re.sub(r"^(\d{1,3})[,.'](\d{1,3})\b", r"\1\2", t)
     f: dict[str, Any] = {}
     m = re.match(r"^(?P<num>\d{1,5}(?:\s?1/2|½)?(?:-\d{1,5})?[A-Za-z]?)\s+(?P<rest>.*)$", t)
     if m:
@@ -457,7 +461,7 @@ def parse_street_line(text: str, street: Optional[str], last_number: Optional[st
 
 
 def clean_heading(text: str) -> str:
-    t = clean_text(text).lstrip("*•").strip()
+    t = clean_text(text).lstrip("*•\"'`").strip()
     t = re.sub(r"\s*[—\-]+\s*Cont(?:d|inued)\.?$", "", t, flags=re.IGNORECASE)
     return t
 
@@ -549,12 +553,13 @@ def ad_fields(lines: list[tuple], full_text: str) -> dict[str, Any]:
     if people:
         f["people"] = list(dict.fromkeys(people))
 
-    # lines: (text, height) or (text, height, y0, y1)
+    # lines: (text, height[, y0, y1[, x0[, conf]]]) in reading order
     cands = []
     for ln in lines:
         s, h = clean_text(ln[0]), float(ln[1])
         y0, y1 = (float(ln[2]), float(ln[3])) if len(ln) >= 4 else (None, None)
-        if s:
+        conf = float(ln[5]) if len(ln) >= 6 else -1.0
+        if s and (conf < 0 or conf >= 45):          # drop OCR garbage lines
             cands.append((s, h, y0, y1))
     if not cands:
         return f
@@ -570,14 +575,17 @@ def ad_fields(lines: list[tuple], full_text: str) -> dict[str, Any]:
         for i, (c, _, _, _) in enumerate(buf[1:]):
             g = gaps[i] if gaps and i < len(gaps) else None
             word += (" " if med is not None and g is not None and g > med * 1.8 + 2 else "") + c
+        # stacked display letters are capitals; OCR confuses O/0 and L/i
+        if sum(ch.isupper() for ch in word) >= sum(ch.islower() for ch in word):
+            word = word.upper().replace("0", "O")
         return [(word, max(h for _, h, _, _ in buf))]
 
     # re-assemble stacked letters: consecutive one/two-character lines
     merged: list[tuple[str, float]] = []
     buf: list = []
     for s, h, y0, y1 in cands:
-        core = re.sub(r"[^A-Za-z0-9&'.]", "", s)
-        if 0 < len(core) <= 2 and s.replace(".", "").replace("'", "").strip().isalpha():
+        core = re.sub(r"[^A-Za-z0-9&]", "", s)
+        if 0 < len(core) <= 2 and (core.isalpha() or core in {"0", "0s", "5"}) and len(s) <= 4:
             buf.append((core, h, y0, y1))
             continue
         merged.extend(flush(buf))

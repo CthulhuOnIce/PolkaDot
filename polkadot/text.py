@@ -20,30 +20,41 @@ DITTO_RE = re.compile(r'^(?:["“”„«»\'`]{1,2}|,,|\'\')$')
 
 
 def group_lines(words: list[Word], merge_tol: float = 0.5) -> list[Line]:
-    """Group words into text lines (top to bottom, words left to right)."""
+    """Group words into text lines (top to bottom, words left to right).
+
+    A word joins a line when their vertical extents overlap by more than
+    ``merge_tol`` of the smaller height - robust to mixed type sizes on one
+    line (display ads) and to slightly sloping baselines.
+    """
     if not words:
         return []
-    hs = np.array([w.bbox.height for w in words])
-    med_h = float(np.median(hs)) if len(hs) else 10.0
     ws = sorted(words, key=lambda w: (w.bbox.cy, w.bbox.x0))
     lines: list[list[Word]] = []
-    centers: list[float] = []
+    spans: list[tuple[float, float]] = []
     for w in ws:
-        best, best_d = -1, 1e9
-        for i in range(len(lines) - 1, max(-1, len(lines) - 4), -1):
-            d = abs(centers[i] - w.bbox.cy)
-            if d < best_d:
-                best, best_d = i, d
-        if best >= 0 and best_d <= merge_tol * med_h:
+        best, best_ov = -1, 0.0
+        for i in range(len(lines) - 1, max(-1, len(lines) - 6), -1):
+            y0, y1 = spans[i]
+            ov = min(y1, w.bbox.y1) - max(y0, w.bbox.y0)
+            small = min(y1 - y0, w.bbox.height) or 1.0
+            # do not let a word bridge into a line it overlaps horizontally
+            if any(o.bbox.x_overlap(w.bbox) > 0.3 * min(o.bbox.width, w.bbox.width) for o in lines[i]):
+                continue
+            if ov / small > best_ov:
+                best, best_ov = i, ov / small
+        if best >= 0 and best_ov >= merge_tol:
             lines[best].append(w)
-            n = len(lines[best])
-            centers[best] = centers[best] + (w.bbox.cy - centers[best]) / n
+            # track the line's core band (median-ish) rather than its union
+            hs = sorted(x.bbox.height for x in lines[best])
+            cy = sorted(x.bbox.cy for x in lines[best])[len(lines[best]) // 2]
+            hh = hs[len(hs) // 2] / 2.0
+            spans[best] = (cy - hh, cy + hh)
         else:
             lines.append([w])
-            centers.append(w.bbox.cy)
+            spans.append((w.bbox.y0, w.bbox.y1))
     out = [Line(sorted(l, key=lambda w: w.bbox.x0)) for l in lines]
-    out.sort(key=lambda l: l.bbox.cy)
-    return _split_wide_gaps(out, med_h)
+    out.sort(key=lambda l: sorted(w.bbox.cy for w in l.words)[len(l.words) // 2])
+    return out
 
 
 def _split_wide_gaps(lines: list[Line], med_h: float) -> list[Line]:
@@ -92,8 +103,13 @@ def join_lines(parts: list[str]) -> str:
 _HEAD_WORD = re.compile(r"^[*•]?[A-Z][A-Za-z'’&.,\-—]*$")
 
 
-def looks_like_heading(line: Line, col: BBox, margin: float, em: float) -> bool:
-    """Centred or all-caps short line without numbers."""
+def looks_like_heading(line: Line, col: BBox, margin: float, em: float,
+                       style: str = "any") -> bool:
+    """Centred or all-caps short line without numbers.
+
+    ``style``: "caps" accepts only capitalised headings (surname / street
+    headings: ``KARR``, ``ADAMS—Contd``); "any" also accepts centred title
+    case (business categories: ``*Floral Designs``, ``Florists``)."""
     t = line.text.strip()
     if not t or any(ch.isdigit() for ch in t):
         return False
@@ -105,16 +121,23 @@ def looks_like_heading(line: Line, col: BBox, margin: float, em: float) -> bool:
     caps = letters and sum(c.isupper() for c in letters) / len(letters) > 0.85
     centred = (abs(b.cx - col.cx) < col.width * 0.12 and b.width < col.width * 0.75
                and b.x0 > margin + em * 0.8)
-    if t.startswith(("*", "•")) and centred:
-        return True
     if caps and len(letters) >= 3 and (centred or len(toks) <= 3) and "—" not in t[:2]:
         return True
-    if centred and all(_HEAD_WORD.match(x) or x.islower() and len(x) <= 4 for x in toks):
+    if style == "caps":
+        return False
+    indented = b.x0 > margin + em * 0.8
+    # OCR often reads the star that marks paid headings as a quote mark
+    starred = re.match(r"""^[*•"“”'‘’]+\s*[A-Z]""", t) is not None
+    if starred and (centred or indented) and len(toks) <= 6:
+        return True
+    loose_centre = abs(b.cx - col.cx) < col.width * 0.2 and b.width < col.width * 0.8 and indented
+    if (centred or loose_centre) and all(_HEAD_WORD.match(x) or x.islower() and len(x) <= 4 for x in toks):
         return True
     return False
 
 
-def assemble_entries(lines: list[Line], col: BBox, numbered: bool = False) -> list[RawEntry]:
+def assemble_entries(lines: list[Line], col: BBox, numbered: bool = False,
+                     heading_style: str = "any") -> list[RawEntry]:
     """Split a column's lines into hanging-indent entries.
 
     ``numbered``: street-guide columns where house numbers sit in a gutter
@@ -136,7 +159,7 @@ def assemble_entries(lines: list[Line], col: BBox, numbered: bool = False) -> li
     for ln in lines:
         if not ln.words:
             continue
-        if looks_like_heading(ln, col, margin, em):
+        if looks_like_heading(ln, col, margin, em, heading_style):
             if cur:
                 entries.append(cur)
             entries.append(RawEntry([ln], is_heading=True))
@@ -150,7 +173,8 @@ def assemble_entries(lines: list[Line], col: BBox, numbered: bool = False) -> li
             # unnumbered resident line aligned with the names column
             if name_margin is not None and abs(ln.bbox.x0 - name_margin) <= tol:
                 starts_new = True
-        if DITTO_RE.match(first) and ln.bbox.x0 <= margin + tol * 2.5:
+        if (DITTO_RE.match(first) or re.match(r"""^["“”‘’„]+[A-Z]""", first)) \
+                and ln.bbox.x0 <= margin + tol * 2.5:
             starts_new = True
         if starts_new or cur is None:
             if cur:

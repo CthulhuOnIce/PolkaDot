@@ -42,7 +42,7 @@ SECTIONS = ("front", "ads", "misc", "street", "alphabetical", "classified")
 class PipelineConfig:
     dpi: int = 300
     text_source: str = "auto"          # auto | pdf | ocr
-    min_text_quality: float = 0.72     # pdf text layer quality needed in auto mode
+    min_text_quality: float = 0.88     # pdf text layer quality needed in auto mode
     ocr_ads: bool = True               # OCR ads even when a text layer exists
     deskew: bool = True
     workers: int = 0                   # 0 = os.cpu_count()
@@ -146,7 +146,7 @@ class PageWork:
     matrix: Optional[list[list[float]]]     # deskew affine (orig px -> deskewed px)
     skew: float
     features: dict
-    region_frames: dict                     # region id -> list of (text, h, y0, y1)
+    region_frames: dict                     # region id -> [(text, h, y0, y1, x0, conf)] in reading frame
 
 
 def analyze_page(doc_path: str, page_no: int, cfg: PipelineConfig) -> PageWork:
@@ -201,7 +201,7 @@ def analyze_page(doc_path: str, page_no: int, cfg: PipelineConfig) -> PageWork:
         if use_pdf:
             words = pdf_words
             r.lines = group_lines(words)
-            frames[r.id] = [(l.text, l.height, l.bbox.y0, l.bbox.y1) for l in r.lines]
+            frames[r.id] = [(l.text, l.height, l.bbox.y0, l.bbox.y1, l.bbox.x0, l.conf) for l in r.lines]
             r.meta["text_source"] = "pdf"
             r.meta["text_quality"] = round(ocrmod.text_quality(words), 3)
             sources.add("pdf")
@@ -211,15 +211,22 @@ def analyze_page(doc_path: str, page_no: int, cfg: PipelineConfig) -> PageWork:
         if r.kind.is_ad or r.kind is RegionKind.AD_LABEL:
             tall = r.bbox.height > r.bbox.width * 1.6
             rots = (0, 270, 90) if (tall and cfg.ocr.try_rotations) else (0,)
-            words, rot, fwords = _ocr_with_frame(img, r.bbox, cfg, rots, cfg.ocr.ad_psm)
+            words, rot, fwords = _ocr_with_frame(img, r.bbox, cfg, rots, cfg.ocr.ad_psm, False)
+            if cfg.ocr.ad_fallback_psm and (len(words) < 3 or ocrmod.text_quality(words) < 0.6):
+                alt = _ocr_with_frame(img, r.bbox, cfg, rots, cfg.ocr.ad_fallback_psm, False)
+                if ocrmod._score(alt[0]) > ocrmod._score(words):
+                    words, rot, fwords = alt
             r.rotation = rot
         else:
-            words, rot, fwords = _ocr_with_frame(img, r.bbox, cfg, (0,), cfg.ocr.text_psm)
+            H, W = img.shape[:2]
+            box = r.bbox.pad(dpi * 0.03, dpi * 0.01, limit=BBox(0, 0, W, H))
+            words, rot, fwords = _ocr_with_frame(img, box, cfg, (0,), cfg.ocr.text_psm)
         # group lines in the (possibly rotated) reading frame
         flines = group_lines(fwords)
         lookup = {id(fw): pw for fw, pw in zip(fwords, words)}
         r.lines = [Line([lookup[id(w)] for w in fl.words]) for fl in flines]
-        frames[r.id] = [(fl.text, fl.height, fl.bbox.y0, fl.bbox.y1) for fl in flines]
+        frames[r.id] = [(fl.text, fl.height, fl.bbox.y0, fl.bbox.y1, fl.bbox.x0, fl.conf)
+                        for fl in flines]
         r.meta["text_source"] = "ocr"
         r.meta["text_quality"] = round(ocrmod.text_quality(words), 3)
         sources.add("ocr")
@@ -250,8 +257,10 @@ def analyze_page(doc_path: str, page_no: int, cfg: PipelineConfig) -> PageWork:
 
 
 def _ocr_with_frame(img: np.ndarray, box: BBox, cfg: PipelineConfig,
-                    rotations: tuple[int, ...], psm: int):
-    return ocrmod.ocr_region(img, box, cfg.ocr, cfg.dpi, psm, rotations)
+                    rotations: tuple[int, ...], psm: int, flatten: bool = True):
+    # display ads (flatten=False) also get a reduced-scale pass for huge type
+    return ocrmod.ocr_region(img, box, cfg.ocr, cfg.dpi, psm, rotations, flatten,
+                             multiscale=not flatten)
 
 
 # --------------------------------------------------------------------------
@@ -355,7 +364,8 @@ def build_entries(work: PageWork, ctx: Context) -> None:
     text_regions = sorted([r for r in res.regions if r.kind is RegionKind.TEXT],
                           key=lambda r: (r.column if r.column >= 0 else 99, r.bbox.x0, r.bbox.y0))
     for r in text_regions:
-        raws = assemble_entries(r.lines, r.bbox, numbered=(sec == "street"))
+        raws = assemble_entries(r.lines, r.bbox, numbered=(sec == "street"),
+                                heading_style="caps" if sec in ("street", "alphabetical") else "any")
         for raw in raws:
             text = raw.text
             if not text:
