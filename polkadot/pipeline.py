@@ -13,6 +13,7 @@ Phase C
 from __future__ import annotations
 
 import logging
+import multiprocessing
 import os
 import re
 import time
@@ -212,10 +213,12 @@ def analyze_page(doc_path: str, page_no: int, cfg: PipelineConfig) -> PageWork:
             tall = r.bbox.height > r.bbox.width * 1.6
             rots = (0, 270, 90) if (tall and cfg.ocr.try_rotations) else (0,)
             words, rot, fwords = _ocr_with_frame(img, r.bbox, cfg, rots, cfg.ocr.ad_psm, False)
-            if cfg.ocr.ad_fallback_psm and (len(words) < 3 or ocrmod.text_quality(words) < 0.6):
-                alt = _ocr_with_frame(img, r.bbox, cfg, rots, cfg.ocr.ad_fallback_psm, False)
-                if ocrmod._score(alt[0]) > ocrmod._score(words):
-                    words, rot, fwords = alt
+            if cfg.ocr.ad_fallback_psm:
+                # psm 6 assumes one type size and can drop lines set smaller
+                # or larger than the rest; a second segmentation mode fills in
+                alt_w, _, alt_f = _ocr_with_frame(img, r.bbox, cfg, (rot,),
+                                                  cfg.ocr.ad_fallback_psm, False)
+                words, fwords = ocrmod.merge_words(words, fwords, alt_w, alt_f)
             r.rotation = rot
         else:
             H, W = img.shape[:2]
@@ -466,7 +469,10 @@ def run_pages(doc_path: str, pages: list[int], cfg: PipelineConfig,
         # tesseract is itself multi-threaded; one thread per process is
         # faster overall when we parallelise across pages
         os.environ.setdefault("OMP_THREAD_LIMIT", "1")
-        with ProcessPoolExecutor(max_workers=workers) as ex:
+        # "spawn" avoids fork-after-threads deadlocks (and matches macOS /
+        # Windows behaviour)
+        ctx = multiprocessing.get_context("spawn")
+        with ProcessPoolExecutor(max_workers=workers, mp_context=ctx) as ex:
             futs = {ex.submit(analyze_page, doc_path, p, cfg): p for p in pages}
             done = 0
             for fut in as_completed(futs):

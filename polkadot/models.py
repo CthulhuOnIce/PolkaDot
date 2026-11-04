@@ -112,8 +112,8 @@ class BBox:
                 int(round(self.x1)), int(round(self.y1)))
 
     def to_list(self, ndigits: int = 1) -> list[float]:
-        return [round(self.x0, ndigits), round(self.y0, ndigits),
-                round(self.x1, ndigits), round(self.y1, ndigits)]
+        return [round(float(self.x0), ndigits), round(float(self.y0), ndigits),
+                round(float(self.x1), ndigits), round(float(self.y1), ndigits)]
 
     @staticmethod
     def from_xywh(x: float, y: float, w: float, h: float) -> "BBox":
@@ -269,6 +269,8 @@ def to_jsonable(obj: Any) -> Any:
     """Convert models (dataclasses / enums / BBoxes) into JSON-friendly data."""
     if isinstance(obj, BBox):
         return obj.to_list()
+    if hasattr(obj, "item") and type(obj).__module__ == "numpy":
+        return obj.item()
     if isinstance(obj, Enum):
         return obj.value
     if isinstance(obj, Line):

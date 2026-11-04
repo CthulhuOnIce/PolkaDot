@@ -154,7 +154,8 @@ def _write_csv(path: Path, rows: list[dict], fields: Optional[list[str]] = None)
         w = csv.DictWriter(fh, fieldnames=fields, extrasaction="ignore")
         w.writeheader()
         for r in rows:
-            w.writerow({k: (json.dumps(v) if isinstance(v, (list, dict)) else v) for k, v in r.items()})
+            w.writerow({k: (json.dumps(to_jsonable(v)) if isinstance(v, (list, dict)) else to_jsonable(v))
+                    for k, v in r.items()})
 
 
 # --------------------------------------------------------------------------
@@ -223,7 +224,7 @@ def export(works: list[PageWork], out: Path, *, crop_entries: str = "business",
                 "entries": [entry_record(e, w) | {"fields": to_jsonable(e.fields)} for e in r.entries],
                 "ads": [ad_record(a, w) for a in r.ads],
             }
-            fh.write(json.dumps(obj, ensure_ascii=False) + "\n")
+            fh.write(json.dumps(to_jsonable(obj), ensure_ascii=False) + "\n")
 
     _write_csv(out / "entries.csv", entry_rows)
     _write_csv(out / "ads.csv", ad_rows)
@@ -234,7 +235,7 @@ def export(works: list[PageWork], out: Path, *, crop_entries: str = "business",
     _write_csv(out / "businesses.csv", biz_rows, biz_fields)
     with open(out / "businesses.jsonl", "w", encoding="utf-8") as fh:
         for r in biz_rows:
-            fh.write(json.dumps(r, ensure_ascii=False) + "\n")
+            fh.write(json.dumps(to_jsonable(r), ensure_ascii=False) + "\n")
 
     doc = {"summary": summary or {}, "config": config or {},
            "files": {"pages": "pages.jsonl", "entries": "entries.csv", "ads": "ads.csv",

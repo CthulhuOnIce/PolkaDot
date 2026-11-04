@@ -559,7 +559,9 @@ def ad_fields(lines: list[tuple], full_text: str) -> dict[str, Any]:
         s, h = clean_text(ln[0]), float(ln[1])
         y0, y1 = (float(ln[2]), float(ln[3])) if len(ln) >= 4 else (None, None)
         conf = float(ln[5]) if len(ln) >= 6 else -1.0
-        if s and (conf < 0 or conf >= 45):          # drop OCR garbage lines
+        # drop OCR garbage lines - but keep short ones, which may be
+        # poorly-read letters of a stacked display word
+        if s and (conf < 0 or conf >= 45 or len(s) <= 2):
             cands.append((s, h, y0, y1))
     if not cands:
         return f
@@ -588,6 +590,8 @@ def ad_fields(lines: list[tuple], full_text: str) -> dict[str, Any]:
         if 0 < len(core) <= 2 and (core.isalpha() or core in {"0", "0s", "5"}) and len(s) <= 4:
             buf.append((core, h, y0, y1))
             continue
+        if buf and len(s) <= 2 and not core and h >= 0.7 * buf[-1][1]:
+            continue      # an unreadable letter inside a stacked word: skip it
         merged.extend(flush(buf))
         buf = []
         merged.append((s, h))

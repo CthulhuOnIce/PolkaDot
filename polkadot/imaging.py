@@ -276,14 +276,15 @@ def find_content_bbox(gray: np.ndarray, ink: np.ndarray, dpi: int) -> BBox:
         return min(left_, right_) < local * 0.92
 
     def main_span(profile: np.ndarray, thresh: float, size: int,
-                  reach: float = 0.4, check_dark: bool = False) -> Optional[tuple[int, int]]:
+                  reach: float = 0.4, check_dark: bool = False,
+                  edge_frac: float = 0.06) -> Optional[tuple[int, int]]:
         """Dominant run, then greedily absorb neighbouring runs that are close
         and do not hug the image border (slivers of the facing page)."""
         runs = _runs(profile, thresh, max_gap=int(dpi * 0.12))
         if not runs:
             return None
         lo, hi, _ = runs[0]
-        edge = size * 0.06
+        edge = size * edge_frac
         others = sorted(runs[1:], key=lambda r: -r[2])
         grew = True
         while grew:
@@ -309,7 +310,7 @@ def find_content_bbox(gray: np.ndarray, ink: np.ndarray, dpi: int) -> BBox:
     x0, x1, _ = runs[0]
     rowp = glyphs[:, x0:x1].sum(axis=1).astype(float)
     # facing pages sit left/right, so vertically we can be far more generous
-    span = main_span(rowp, max(1.0, 0.01 * (x1 - x0)), h, reach=1.5)
+    span = main_span(rowp, max(1.0, 0.01 * (x1 - x0)), h, reach=1.5, edge_frac=0.01)
     if span is None:
         return BBox(x0, 0, x1, h)
     y0, y1 = span

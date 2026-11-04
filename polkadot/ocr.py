@@ -7,6 +7,8 @@ from.
 
 from __future__ import annotations
 
+import logging
+import os
 import re
 import shutil
 from dataclasses import dataclass
@@ -19,9 +21,16 @@ import numpy as np
 from . import imaging as im
 from .models import BBox, Word
 
+log = logging.getLogger("polkadot.ocr")
+
 # --------------------------------------------------------------------------
 # Tesseract
 # --------------------------------------------------------------------------
+
+# Tesseract's OpenMP threads busy-wait; with several pages OCR'd in parallel
+# (or any other load) they oversubscribe the CPU and a single call can stall
+# for minutes.  We parallelise across pages instead.
+os.environ.setdefault("OMP_THREAD_LIMIT", "1")
 
 
 @lru_cache(maxsize=1)
@@ -38,12 +47,39 @@ class OcrConfig:
     lang: str = "eng"
     oem: int = 1
     text_psm: int = 6          # uniform block of text: listing columns
-    ad_psm: int = 6            # display advertising (falls back to 11, sparse text)
-    ad_fallback_psm: int = 11
+    ad_psm: int = 6            # display advertising ...
+    ad_fallback_psm: int = 3   # ... merged with a second, auto-segmented pass (0 = off)
     min_conf: float = 0.0      # words below this are dropped (-1 = keep all)
     pad: int = 12              # white border added around crops (px)
     upscale_below_dpi: int = 250
     try_rotations: bool = True
+    timeout: float = 120.0     # seconds per Tesseract call (0 = no limit)
+
+
+def _erase_rules(g: np.ndarray) -> np.ndarray:
+    """Paint out long straight rules (box borders, column rules).
+
+    A border running along the edge of a crop makes Tesseract's page
+    segmentation drop whole lines of text, so rules spanning most of the
+    crop are replaced by the surrounding paper tone."""
+    h, w = g.shape[:2]
+    if h < 8 or w < 8:
+        return g
+    _, ink = cv2.threshold(g, 0, 255, cv2.THRESH_BINARY_INV | cv2.THRESH_OTSU)
+    hk = max(20, int(w * 0.5))
+    vk = max(20, int(h * 0.5))
+    lines = cv2.morphologyEx(ink, cv2.MORPH_OPEN, cv2.getStructuringElement(cv2.MORPH_RECT, (hk, 1)))
+    lines |= cv2.morphologyEx(ink, cv2.MORPH_OPEN, cv2.getStructuringElement(cv2.MORPH_RECT, (1, vk)))
+    if not lines.any():
+        return g
+    # keep thin rules only: a solid panel (reverse-video ad) is not a rule
+    thick = cv2.morphologyEx(ink, cv2.MORPH_OPEN, np.ones((9, 9), np.uint8))
+    lines[thick > 0] = 0
+    lines = cv2.dilate(lines, np.ones((3, 3), np.uint8))
+    paper = int(np.median(g[ink == 0])) if (ink == 0).any() else 255
+    out = g.copy()
+    out[lines > 0] = paper
+    return out
 
 
 def _prep(crop: np.ndarray, pad: int, flatten: bool = True, dpi: int = 300) -> np.ndarray:
@@ -53,7 +89,7 @@ def _prep(crop: np.ndarray, pad: int, flatten: bool = True, dpi: int = 300) -> n
     so we either flatten the background to white first (``flatten``) or
     pad with the crop's own paper colour (keeps reverse-video panels, which
     flattening would wash out)."""
-    g = im.to_gray(crop)
+    g = _erase_rules(im.to_gray(crop))
     if flatten:
         g = im.normalize_background(g, dpi)
         val = 255
@@ -84,8 +120,13 @@ def ocr_image(crop: np.ndarray, psm: int, cfg: OcrConfig, dpi: int,
     config = f"--oem {cfg.oem} --psm {psm} -c preserve_interword_spaces=1"
     try:
         data = pytesseract.image_to_data(img, lang=cfg.lang, config=config,
-                                         output_type=pytesseract.Output.DICT)
-    except Exception:  # pragma: no cover - tesseract crash on odd crops
+                                         output_type=pytesseract.Output.DICT,
+                                         timeout=cfg.timeout or 0)
+    except RuntimeError as exc:  # pytesseract raises RuntimeError on timeout
+        log.warning("tesseract gave up on a %dx%d crop: %s", img.shape[1], img.shape[0], exc)
+        return []
+    except Exception as exc:  # pragma: no cover - tesseract crash on odd crops
+        log.warning("tesseract failed: %s", exc)
         return []
     words: list[Word] = []
     for i, txt in enumerate(data["text"]):
@@ -172,6 +213,22 @@ def ocr_region(page_img: np.ndarray, box: BBox, cfg: OcrConfig, dpi: int, psm: i
     words = [Word(w.text, im.unrotate_bbox(w.bbox, rot, cw, ch).translate(pbox.x0, pbox.y0),
                   w.conf, w.source) for w in fwords]
     return words, rot, fwords
+
+
+def merge_words(a: list[Word], a_frame: list[Word], b: list[Word],
+                b_frame: list[Word]) -> tuple[list[Word], list[Word]]:
+    """Union of two OCR passes over the same crop (aligned page/frame lists):
+    words of ``b`` are added where ``a`` found nothing."""
+    out, out_f = list(a), list(a_frame)
+    for w, fw in zip(b, b_frame):
+        if w.conf < 50 or not any(c.isalnum() for c in w.text):
+            continue
+        if any(w.bbox.iou(o.bbox) > 0.1 or o.bbox.overlap_ratio(w.bbox) > 0.4
+               or w.bbox.overlap_ratio(o.bbox) > 0.4 for o in out):
+            continue
+        out.append(w)
+        out_f.append(fw)
+    return out, out_f
 
 
 def _add_large_type(crop: np.ndarray, words: list[Word], psm: int, cfg: OcrConfig,

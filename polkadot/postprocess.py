@@ -52,12 +52,15 @@ def group_ads(ads: list[Ad], threshold: float = 0.82) -> None:
         for i, k in enumerate(keys):
             if len(k) < 6 or abs(len(k) - len(key)) > max(len(k), len(key)) * 0.4:
                 continue
-            same_phone = set(ad.phones) & set(groups[i][0].phones)
             r = SequenceMatcher(None, k, key).quick_ratio()
-            if r < threshold * 0.9 and not same_phone:
+            if r < threshold * 0.8:
                 continue
             r = SequenceMatcher(None, k, key).ratio()
-            if r >= threshold or (same_phone and r >= threshold * 0.7):
+            # a shared phone number only helps when the names agree too
+            # (one number can serve several firms in the same building)
+            same_phone = bool(set(ad.phones) & set(groups[i][0].phones))
+            names_agree = similar(ad.business_name or "", groups[i][0].business_name or "") >= 0.75
+            if r >= threshold or (same_phone and names_agree and r >= threshold * 0.8):
                 hit = i
                 break
         if hit is None:
