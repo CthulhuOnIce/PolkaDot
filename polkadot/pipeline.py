@@ -234,6 +234,12 @@ def analyze_page(doc_path: str, page_no: int, cfg: PipelineConfig) -> PageWork:
         r.meta["text_quality"] = round(ocrmod.text_quality(words), 3)
         sources.add(source)
 
+        if r.kind is RegionKind.TEXT and words and rot == 0:
+            kept, newbox = trim_edge_slivers(words, r.bbox, layout.body_h * 1.6)
+            if len(kept) < len(words):
+                r.meta["trimmed_words"] = len(words) - len(kept)
+                words = fwords = kept
+                r.bbox = newbox
         pieces = [(r, words, fwords)]
         if r.kind is RegionKind.TEXT:
             # last line of defence against two columns merged into one region
@@ -284,6 +290,52 @@ def analyze_page(doc_path: str, page_no: int, cfg: PipelineConfig) -> PageWork:
               len(layout.regions))
     return PageWork(res, img_path, matrix.tolist() if matrix is not None else None,
                     skew, feats, frames)
+
+
+def trim_edge_slivers(words: list[Word], box: BBox, em: float) -> tuple[list[Word], BBox]:
+    """Drop print from the facing page that leaked into the edge of a column.
+
+    A strip at the left/right edge, cut off from the column by a vertical
+    channel no word crosses, and reading badly (fragments of clipped words),
+    is a sliver of the neighbouring leaf."""
+    if len(words) < 12:
+        return words, box
+    x0 = int(box.x0)
+    n = int(box.width) + 2
+    cover = np.zeros(n, np.int32)
+    for w in words:
+        cover[max(0, int(w.bbox.x0) - x0):max(0, int(w.bbox.x1) - x0)] += 1
+    lim = int(box.width * 0.3)
+
+    def channel(rng) -> Optional[int]:
+        run = 0
+        for i in rng:
+            run = run + 1 if cover[i] == 0 else 0
+            if run >= em * 0.35:
+                return i
+        return None
+
+    out = list(words)
+    nb = box
+    cut = channel(range(lim, 0, -1))           # scan from 30% towards the left edge
+    if cut is not None:
+        side = [w for w in out if w.bbox.cx < x0 + cut]
+        if side and len(side) < len(out) * 0.4 and _poor(side):
+            out = [w for w in out if w not in side]
+            nb = BBox(x0 + cut, nb.y0, nb.x1, nb.y1)
+    cut = channel(range(n - lim, n))
+    if cut is not None:
+        side = [w for w in out if w.bbox.cx > x0 + cut]
+        if side and len(side) < len(out) * 0.4 and _poor(side):
+            out = [w for w in out if w not in side]
+            nb = BBox(nb.x0, nb.y0, x0 + cut, nb.y1)
+    return out, nb
+
+
+def _poor(words: list[Word]) -> bool:
+    confs = [w.conf for w in words if w.conf >= 0]
+    mean_conf = sum(confs) / len(confs) if confs else 100.0
+    return mean_conf < 65 or ocrmod.text_quality(words) < 0.55
 
 
 def split_words_into_columns(words: list[Word], box: BBox, em: float,
@@ -347,21 +399,45 @@ _MARKERS = [
 ]
 
 
+_TITLED_RE = re.compile(r"""^[*•"“”'‘’]?\s*[A-Z][a-z]+(?:[ —-]+(?:[A-Z][a-z]+|and|of|&))*$""")
+_DASH_RE = re.compile(r"[A-Za-z.)]\s?—\s?\d")
+
+
 def section_features(res: PageResult) -> dict:
     lines = [l for r in res.regions if r.kind is RegionKind.TEXT for l in r.lines]
     n = len(lines)
+    # centred, short, mixed-case lines without numbers = category headings
+    titled = 0
+    for r in res.regions:
+        if r.kind is not RegionKind.TEXT:
+            continue
+        for l in r.lines:
+            t = l.text.strip()
+            b = l.bbox
+            if (len(t.split()) <= 5 and not any(c.isdigit() for c in t) and not t.isupper()
+                    and _TITLED_RE.match(t) and abs(b.cx - r.bbox.cx) < r.bbox.width * 0.12
+                    and b.width < r.bbox.width * 0.7 and b.x0 > r.bbox.x0 + l.height * 2):
+                titled += 1
     ad_area = sum(r.bbox.area for r in res.regions if r.kind.is_ad)
     content_area = res.content_bbox.area if res.content_bbox else 1.0
-    texts = [l.text for l in lines]
+    texts = [l.text.strip() for l in lines]
     num_start = sum(1 for t in texts if re.match(r"^\d{1,5}\b", t))
     res_hits = sum(1 for t in texts if _RES_RE.search(" " + t))
     see = sum(1 for t in texts if "(See" in t or "(see" in t)
-    star = sum(1 for t in texts if t.lstrip().startswith("*"))
-    all_text = " ".join(r.text for r in res.regions)
-    markers = [sec for rx, sec in _MARKERS if rx.search(all_text)]
+    star = sum(1 for t in texts if t.startswith("*"))
+    dash = sum(1 for t in texts if _DASH_RE.search(t))
+    # section titles only count on sparse pages (title / divider pages) and
+    # only from the listing text - ads quote "the Classified Business Lists"
+    markers: list[str] = []
+    if n < 40:
+        body_text = " ".join(texts)
+        found = {sec for rx, sec in _MARKERS if rx.search(body_text)}
+        if len(found) == 1:
+            markers = sorted(found)
     return {"n_lines": n, "ad_frac": ad_area / max(1.0, content_area),
             "num_start": num_start / max(1, n), "res": res_hits / max(1, n),
-            "see": see / max(1, n), "star": star, "markers": markers}
+            "see": see / max(1, n), "star": star, "titled": titled / max(1, n),
+            "dash": dash / max(1, n), "markers": markers}
 
 
 def guess_section(f: dict) -> tuple[str, float]:
@@ -372,39 +448,86 @@ def guess_section(f: dict) -> tuple[str, float]:
         return "street", min(1.0, f["num_start"] * 1.6)
     if f["res"] > 0.18:
         return "alphabetical", min(1.0, f["res"] * 2.5)
-    if f["see"] > 0.02 or f["star"] >= 2:
-        return "classified", 0.6
-    return "misc", 0.3
+    titled, dash = f.get("titled", 0.0), f.get("dash", 0.0)
+    if f["res"] < 0.1:
+        cls = min(1.0, f["see"] * 8 + titled * 6 + f["star"] * 0.1)
+        misc = min(1.0, dash * 4)
+        if cls >= misc and cls > 0.15:
+            return "classified", cls
+        if misc > 0.15:
+            return "misc", misc
+    return "misc", 0.2
 
 
 def assign_sections(works: list[PageWork], overrides: dict[int, str]) -> None:
     """Per-page guesses smoothed with document context.
 
-    Directories are organised in long contiguous sections; a weak guess is
-    replaced by the section in force (from the previous confident page or
-    an explicit section title such as "Classified Business Directory").
+    Directories are organised in long contiguous sections.  A weakly
+    classified page takes the section of the confident pages around it
+    when those agree (or follows an explicit section title page); confident
+    pages and advertising pages keep their own classification.
     """
-    current: Optional[str] = None
+    guesses: list[tuple[str, float]] = []
     for w in works:
         p = w.result.page
         if p in overrides:
-            w.result.section = overrides[p]
-            current = overrides[p] if overrides[p] not in ("ads",) else current
-            continue
-        guess, conf = guess_section(w.features)
-        for m in w.features.get("markers", []):
-            if guess in ("front", "misc", "ads") or conf < 0.5:
-                current = m
-        if guess == "ads":
-            w.result.section = "ads"
-            continue
-        if conf >= 0.5 or current is None:
-            w.result.section = guess
-            if guess not in ("front",):
-                current = guess
+            guesses.append((overrides[p], 2.0))
         else:
-            w.result.section = current if current in ("classified", "alphabetical", "street") \
-                and w.features["n_lines"] >= 20 else guess
+            guesses.append(guess_section(w.features))
+    n = len(works)
+    strong = [g[1] >= 0.5 and g[0] not in ("ads", "front") for g in guesses]
+
+    def neighbour(i: int, step: int) -> Optional[str]:
+        j = i + step
+        while 0 <= j < n:
+            if strong[j]:
+                return guesses[j][0]
+            # a section title page also anchors what follows it
+            if step < 0 and works[j].features.get("markers"):
+                return works[j].features["markers"][0]
+            j += step
+        return None
+
+    for i, w in enumerate(works):
+        sec, conf = guesses[i]
+        if conf < 0.5 and sec not in ("ads", "front"):
+            before, after = neighbour(i, -1), neighbour(i, +1)
+            if before is not None and before == after:
+                sec = before
+            elif after is None and before is not None and w.features["n_lines"] >= 20:
+                sec = before          # tail of the book
+        w.result.section = sec
+
+    # real sections run for dozens of pages: a short island of another
+    # listing section between two long stretches of the same one is a
+    # misreading (advertising pages and explicit overrides excepted)
+    listing = ("alphabetical", "street", "classified", "misc")
+    runs: list[list[int]] = []
+    for i, w in enumerate(works):
+        if runs and works[runs[-1][0]].result.section == w.result.section:
+            runs[-1].append(i)
+        else:
+            runs.append([i])
+    ads_like = ("ads", "front")
+
+    def neighbour_run(k: int, step: int) -> Optional[list[int]]:
+        j = k + step
+        while 0 <= j < len(runs) and works[runs[j][0]].result.section in ads_like:
+            j += step
+        return runs[j] if 0 <= j < len(runs) else None
+
+    for k, run in enumerate(runs):
+        sec = works[run[0]].result.section
+        if sec not in listing or len(run) > 2:
+            continue
+        if any(works[i].result.page in overrides for i in run):
+            continue
+        prev, nxt = neighbour_run(k, -1), neighbour_run(k, +1)
+        if prev and nxt and len(prev) >= 3 and len(nxt) >= 3:
+            ps, ns = works[prev[0]].result.section, works[nxt[0]].result.section
+            if ps == ns and ps in listing and ps != sec:
+                for i in run:
+                    works[i].result.section = ps
 
 
 # --------------------------------------------------------------------------
@@ -485,9 +608,10 @@ def build_entries(work: PageWork, ctx: Context) -> None:
                 fields, advertiser = out["fields"], out.get("advertiser", False)
                 kind = EntryKind(out["kind"])
                 heading = ctx.category
-            fields.setdefault("phones", P.find_phones(text)) if "phones" not in fields else None
-            if not fields.get("phones"):
-                fields.pop("phones", None)
+            if "phones" not in fields:
+                phones = P.find_phones(text)
+                if phones:
+                    fields["phones"] = phones
             e = Entry(id=f"p{res.page + 1}_e{n}", page=res.page, region_id=r.id, section=sec,
                       kind=kind, text=text, bbox=raw.bbox, lines=raw.lines,
                       heading=heading, fields=fields, advertiser=bool(advertiser))

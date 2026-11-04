@@ -39,33 +39,44 @@ def similar(a: str, b: str) -> float:
 
 
 def group_ads(ads: list[Ad], threshold: float = 0.82) -> None:
-    """Assign ``meta['group']`` / ``meta['occurrences']`` to repeated ads."""
+    """Assign ``meta['group']`` / ``meta['occurrences']`` to repeated ads.
+
+    Candidates are blocked by shared distinctive words, so only ads that
+    could plausibly be the same are compared character by character."""
     groups: list[list[Ad]] = []
     keys: list[str] = []
+    block: dict[str, set[int]] = defaultdict(set)
     for ad in ads:
         key = norm_name(ad.text)[:240]
-        if len(key) < 6:
-            groups.append([ad])
-            keys.append(key)
-            continue
+        toks = {t for t in key.split() if len(t) >= 4}
         hit = None
-        for i, k in enumerate(keys):
-            if len(k) < 6 or abs(len(k) - len(key)) > max(len(k), len(key)) * 0.4:
-                continue
-            r = SequenceMatcher(None, k, key).quick_ratio()
-            if r < threshold * 0.8:
-                continue
-            r = SequenceMatcher(None, k, key).ratio()
-            # a shared phone number only helps when the names agree too
-            # (one number can serve several firms in the same building)
-            same_phone = bool(set(ad.phones) & set(groups[i][0].phones))
-            names_agree = similar(ad.business_name or "", groups[i][0].business_name or "") >= 0.75
-            if r >= threshold or (same_phone and names_agree and r >= threshold * 0.8):
-                hit = i
-                break
+        if len(key) >= 6:
+            counts: dict[int, int] = defaultdict(int)
+            for t in toks:
+                for gi in block.get(t, ()):
+                    counts[gi] += 1
+            need = 1 if len(toks) <= 3 else 2
+            for gi in sorted((g for g, c in counts.items() if c >= need), key=lambda g: -counts[g]):
+                k = keys[gi]
+                if abs(len(k) - len(key)) > max(len(k), len(key)) * 0.4:
+                    continue
+                sm = SequenceMatcher(None, k, key)
+                if sm.quick_ratio() < threshold * 0.8:
+                    continue
+                r = sm.ratio()
+                # a shared phone number only helps when the names agree too
+                # (one number can serve several firms in the same building)
+                same_phone = bool(set(ad.phones) & set(groups[gi][0].phones))
+                names_agree = similar(ad.business_name or "", groups[gi][0].business_name or "") >= 0.75
+                if r >= threshold or (same_phone and names_agree and r >= threshold * 0.8):
+                    hit = gi
+                    break
         if hit is None:
             groups.append([ad])
             keys.append(key)
+            hit = len(groups) - 1
+            for t in toks:
+                block[t].add(hit)
         else:
             groups[hit].append(ad)
     for gi, g in enumerate(groups):

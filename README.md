@@ -134,6 +134,20 @@ for w in works:
 export.export(works, "out/")
 ```
 
+## Code map
+
+| module | role |
+|---|---|
+| `polkadot/imaging.py` | binarisation, deskew, printed-area detection, rules, boxes, reverse-video panels |
+| `polkadot/layout.py` | page segmentation into columns / heads / ad regions (`analyze_layout`) |
+| `polkadot/ocr.py` | Tesseract wrapper (rotations, inversion, multi-scale, rule erasing) and PDF text-layer reader |
+| `polkadot/text.py` | words → lines → hanging-indent entries, heading detection |
+| `polkadot/parse.py` | field grammars for each section, addresses, phones, ad fields, abbreviations |
+| `polkadot/pipeline.py` | per-page analysis (parallel), section detection, entry / ad building, `reparse` |
+| `polkadot/postprocess.py` | repeated-ad grouping, ad ↔ listing links, consolidated business index |
+| `polkadot/export.py` | CSV / JSON / crops / overlays / `index.html` |
+| `polkadot/cli.py` | the `polkadot` command |
+
 ## Where the sample data comes from
 
 PolkaDot was developed against **Polk's Gary (Indiana) City Directory 1922**

@@ -380,6 +380,15 @@ def _analyze(img: np.ndarray, dpi: int, page_no: int, cfg: LayoutConfig,
         return layout
 
     body_cols = [piece for c in body_cols for piece in _split_column(work, c, body_h)]
+    # a much narrower "column" at the outer edge of the body is a side ad
+    # set in small type (e.g. a transfer company's list of services)
+    if len(body_cols) >= 3:
+        ws = sorted(c.width for c in body_cols)
+        med = ws[len(ws) // 2]
+        body_cols.sort(key=lambda c: c.x0)
+        for edge in (body_cols[0], body_cols[-1]):
+            if edge.width < med * 0.62 and edge in body_cols:
+                body_cols.remove(edge)
     body = BBox.enclosing(body_cols)
     assert body is not None
     layout.body = body
