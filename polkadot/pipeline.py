@@ -641,6 +641,25 @@ def build_entries(work: PageWork, ctx: Context) -> None:
             n += 1
 
 
+def _edge_junk(r: Region, text: str, res: PageResult) -> bool:
+    """A small ad region at the very edge of the printed area whose text
+    does not read as words is debris from the scan edge, not an ad."""
+    cb = res.content_bbox
+    if cb is None:
+        return False
+    tol = res.dpi * 0.12
+    at_edge = (r.bbox.x0 - cb.x0 <= tol or cb.x1 - r.bbox.x1 <= tol
+               or r.bbox.y0 - cb.y0 <= tol or cb.y1 - r.bbox.y1 <= tol)
+    small = min(r.bbox.width, r.bbox.height) < res.dpi * 0.7
+    # one properly-cased word of 4+ letters ("DAIRY", "Phones", "Gary") is
+    # enough to keep it: small corner cards are real ads
+    readable = any(w.isupper() or w.islower() or w.istitle()
+                   for w in re.findall(r"[A-Za-z]{4,}", text))
+    # ... and so is a stacked-letter display word ("O L D S M O B I L E")
+    readable = readable or len(re.findall(r"\b[A-Z]\b", text)) >= 6
+    return at_edge and small and not readable
+
+
 def build_ads(work: PageWork) -> None:
     res = work.result
     labels = {r.id: r for r in res.regions if r.kind is RegionKind.AD_LABEL}
@@ -651,6 +670,8 @@ def build_ads(work: PageWork) -> None:
         text = join_lines([t for t, *_ in frame]) if frame else r.text
         if sum(c.isalpha() for c in text) < 3:
             continue          # a page number, an ornament or an unreadable cut
+        if _edge_junk(r, text, res):
+            continue          # a scrap of the facing page / thumb-index tab
         f = P.ad_fields(frame, text)
         cat = None
         if r.meta.get("label_region") in labels:

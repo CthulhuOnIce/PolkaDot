@@ -163,3 +163,23 @@ def test_telephone_listings():
     assert P.parse_telephone("Hajduch A groc 1719, 119th....Whitng-1734")["fields"]["phones"] == ["Whiting 1734"]
     f = P.parse_classified("KAISER BROS SERVICE STA 2250 W 15th ------TU 2-7871", "Service Stations")["fields"]
     assert f["name"] == "KAISER BROS SERVICE STA" and f["phones"] == ["TU 2-7871"]
+
+
+def test_hanging_indent_ignores_stray_fragments_at_left_edge():
+    """Word-tails spilling in from the neighbouring column must not shift the
+    column margin (which would glue every listing into one)."""
+    col = BBox(0, 0, 300, 600)
+    lines = []
+    y = 0
+    for i in range(12):
+        if i % 4 == 0:                         # stray "fer-" tail left of the margin
+            lines.append(Line([_w("son", -12, y, 8, y + 14)]))
+            y += 20
+        ws, cx = [], 10
+        for t in f"Smith Paul{i} lab h {100 + i} Adams".split():
+            ws.append(_w(t, cx, y, cx + 8 * len(t), y + 14))
+            cx += 8 * len(t) + 6
+        lines.append(Line(ws))
+        y += 20
+    ents = assemble_entries(lines, col, heading_style="caps")
+    assert sum(1 for e in ents if e.text.startswith("Smith")) == 12

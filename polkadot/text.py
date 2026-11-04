@@ -141,22 +141,15 @@ def looks_like_heading(line: Line, col: BBox, margin: float, em: float,
     return False
 
 
-def _left_margin(x0s: list[float], tol: float, share: float = 0.15) -> float:
-    """The column's left margin: the leftmost position at which a good share
-    of lines start.  (A low percentile is dragged left by stray fragments,
-    e.g. hyphenated word-tails from the neighbouring column.)"""
-    xs = sorted(x0s)
-    if not xs:
-        return 0.0
-    need = max(2, int(len(xs) * share))
-    j = 0
-    for i, x in enumerate(xs):
-        while xs[j] < x - tol:
-            j += 1
-        # lines starting within [x - tol, x]
-        if i - j + 1 >= need:
-            return float(xs[j])
-    return float(np.percentile(xs, 10))
+def _left_margin(lines: list[Line], em: float) -> float:
+    """The column's left margin: a low percentile of line starts, ignoring
+    lone short words - stray fragments such as hyphenated word-tails that
+    spill in from the neighbouring column and would drag the margin left."""
+    starts = [l.bbox.x0 for l in lines
+              if l.words and not (len(l.words) == 1 and l.bbox.width < em * 5)]
+    if len(starts) < 3:
+        starts = [l.bbox.x0 for l in lines if l.words]
+    return float(np.percentile(starts, 10)) if starts else 0.0
 
 
 def assemble_entries(lines: list[Line], col: BBox, numbered: bool = False,
@@ -173,7 +166,7 @@ def assemble_entries(lines: list[Line], col: BBox, numbered: bool = False,
     hs = sorted(l.height for l in lines if l.words)
     em = hs[len(hs) // 2] if hs else 10.0
     tol = max(em * 0.55, 3.0)
-    margin = _left_margin([l.bbox.x0 for l in lines if l.words], tol)
+    margin = _left_margin(lines, em)
 
     name_margin = _name_margin(lines) if numbered else None
     entries: list[RawEntry] = []

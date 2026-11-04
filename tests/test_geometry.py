@@ -40,3 +40,23 @@ def test_merge_collinear_rules():
     out = im.merge_collinear(segs, horizontal=False, dpi=200)
     assert len(out) == 2
     assert any(s.y0 == 10 and s.y1 == 400 and s.x0 == 100 for s in out)
+
+
+def test_trim_outside_frame_drops_facing_page_strip():
+    """Print beyond a double frame rule, after a blank margin, is the facing page."""
+    import cv2
+    dpi = 200
+    ink = np.zeros((1200, 1000), np.uint8)
+    ink[100:1100, 100:104] = 255                 # left frame rule
+    ink[100:1100, 800:804] = 255                 # right frame rule ...
+    ink[100:1100, 807:810] = 255                 # ... doubled
+    for y in range(150, 1050, 30):               # text inside the frame
+        ink[y:y + 10, 130:770:14] = 255
+    for y in range(150, 1050, 30):               # facing page text beyond a gap
+        ink[y:y + 10, 880:960:14] = 255
+    ink[100:1100, 975:978] = 255                 # facing leaf edge looks like a rule too
+    content = BBox(95, 95, 965, 1105)
+    rules = im.find_rule_lines(ink, BBox(0, 0, 1000, 1200), dpi)
+    out = im.trim_outside_frame(content, rules, ink, dpi)
+    assert 805 <= out.x1 <= 830
+    assert out.x0 == content.x0                   # nothing to trim on the left

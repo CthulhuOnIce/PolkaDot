@@ -178,7 +178,7 @@ class _Cutter:
         # ruling lines are the strongest separators
         # (a horizontal rule must cross most of the block - a boxed notice
         # in one corner must not slice through neighbouring columns)
-        for axis, frac in (("y", 0.65), ("x", 0.5)):
+        for axis, frac in (("y", 0.5), ("x", 0.5)):
             rc = self._rule_cuts(box, axis, frac)
             if rc:
                 return axis, rc
@@ -348,6 +348,19 @@ def _analyze(img: np.ndarray, dpi: int, page_no: int, cfg: LayoutConfig,
         if st.large_frac > 0.2 or st.body_frac < 0.75:
             continue
         body_cols.append(c)
+    # second chance: a column of the same size as an accepted one, set in
+    # small type but with many bold / capitalised listings (paid entries
+    # such as "PHOENIX FIRE INSURANCE CO") is a listing column too
+    for c in columns:
+        if c in body_cols or c.height < min_h or c.width < min_w:
+            continue
+        twin = any(abs(c.width - b.width) <= 0.15 * b.width and abs(c.height - b.height) <= 0.15 * b.height
+                   and c.y_overlap(b) >= 0.8 * min(c.height, b.height) for b in body_cols)
+        if not twin:
+            continue
+        st = im.block_stats(comps, c, body_h, work)
+        if st.large_frac <= 0.4 and st.body_frac >= 0.9:
+            body_cols.append(c)
     # body columns must not be absurdly narrow compared to the widest one
     if body_cols:
         wmax = max(c.width for c in body_cols)
