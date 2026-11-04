@@ -141,6 +141,24 @@ def looks_like_heading(line: Line, col: BBox, margin: float, em: float,
     return False
 
 
+def _left_margin(x0s: list[float], tol: float, share: float = 0.15) -> float:
+    """The column's left margin: the leftmost position at which a good share
+    of lines start.  (A low percentile is dragged left by stray fragments,
+    e.g. hyphenated word-tails from the neighbouring column.)"""
+    xs = sorted(x0s)
+    if not xs:
+        return 0.0
+    need = max(2, int(len(xs) * share))
+    j = 0
+    for i, x in enumerate(xs):
+        while xs[j] < x - tol:
+            j += 1
+        # lines starting within [x - tol, x]
+        if i - j + 1 >= need:
+            return float(xs[j])
+    return float(np.percentile(xs, 10))
+
+
 def assemble_entries(lines: list[Line], col: BBox, numbered: bool = False,
                      heading_style: str = "any") -> list[RawEntry]:
     """Split a column's lines into hanging-indent entries.
@@ -154,9 +172,8 @@ def assemble_entries(lines: list[Line], col: BBox, numbered: bool = False,
         return []
     hs = sorted(l.height for l in lines if l.words)
     em = hs[len(hs) // 2] if hs else 10.0
-    x0s = np.array([l.bbox.x0 for l in lines])
-    margin = float(np.percentile(x0s, 10))
     tol = max(em * 0.55, 3.0)
+    margin = _left_margin([l.bbox.x0 for l in lines if l.words], tol)
 
     name_margin = _name_margin(lines) if numbered else None
     entries: list[RawEntry] = []

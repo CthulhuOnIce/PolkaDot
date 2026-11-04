@@ -604,38 +604,73 @@ def expand_to_rules(content: BBox, rules: "RuleLines", dpi: int,
 
 def trim_outside_frame(content: BBox, rules: "RuleLines", ink: np.ndarray, dpi: int,
                        max_frac: float = 0.25, min_gap: float = 0.2) -> BBox:
-    """Drop a band of print lying beyond the outermost long vertical rule
-    when it is separated from that rule by a wide blank margin.
+    """Drop a band of print beyond a long vertical frame rule when it is
+    separated from that rule by a wide blank margin.
 
     Directory pages are framed by rules (ad boxes, column rules).  Print
-    beyond the outermost one *and* well separated from it is the facing
-    page (margins + gutter), whereas a genuine unboxed side ad hugs it."""
-    long = [s for s in rules.v_segments if s.height >= 0.6 * content.height]
+    beyond the frame *and* well separated from it is the facing page
+    (margins + gutter), whereas a genuine unboxed side ad hugs it.  Rules
+    are tried from the print outwards, because the edge of the facing leaf
+    can itself look like one more long rule; two rules that are the sides of
+    one box (joined by a horizontal rule) are never cut apart."""
+    long = sorted((s for s in rules.v_segments if s.height >= 0.6 * content.height),
+                  key=lambda s: s.cx)
     if not long:
         return content
-    left = min(long, key=lambda s: s.x0)
-    right = max(long, key=lambda s: s.x1)
     y0, y1 = int(content.y0), int(content.y1)
-    x0, x1 = content.x0, content.x1
     thresh = max(2, int(content.height * 0.003))
+    x0, x1 = content.x0, content.x1
 
     def inked(a_: int, b_: int) -> np.ndarray:
+        """Columns carrying glyph-sized marks (the long stripes of stacked
+        leaf edges in a closed book are not print)."""
         if b_ <= a_:
             return np.zeros(0, bool)
-        return (ink[y0:y1, a_:b_] > 0).sum(axis=0) > thresh
+        sub = ink[y0:y1, a_:b_]
+        n_, lab, st, _ = cv2.connectedComponentsWithStats(sub, connectivity=8)
+        keep = np.zeros(n_, bool)
+        if n_ > 1:
+            hh = st[:, cv2.CC_STAT_HEIGHT]
+            keep = (hh <= dpi * 0.4) & (st[:, cv2.CC_STAT_AREA] >= 4)
+            keep[0] = False
+        glyph = keep[lab]
+        return glyph.sum(axis=0) > thresh
 
-    strip = int(left.x0) - int(content.x0)
-    if dpi * 0.05 < strip < max_frac * content.width:
-        cols = inked(int(content.x0), int(left.x0) - 3)
-        idx = np.nonzero(cols)[0]
-        if len(idx) == 0 or (len(cols) - 1 - idx.max()) >= dpi * min_gap:
-            x0 = left.x0 - 2
-    strip = int(content.x1) - int(right.x1)
-    if dpi * 0.05 < strip < max_frac * content.width:
-        cols = inked(int(right.x1) + 3, int(content.x1))
-        idx = np.nonzero(cols)[0]
-        if len(idx) == 0 or idx.min() >= dpi * min_gap:
-            x1 = right.x1 + 2
+    # right side: innermost qualifying rule first
+    for k in range(len(long)):
+        r = long[k]
+        strip = content.x1 - r.x1
+        if not (dpi * 0.05 < strip < max_frac * content.width):
+            continue
+        nxt = long[k + 1] if k + 1 < len(long) else None
+        if nxt is not None and _boxed(ink, int(r.x0), int(nxt.x1), y0, y1):
+            continue
+        cols = inked(int(r.x1) + 3, int(content.x1))
+        # a double rule / box border right next to the rule belongs to it
+        lead = 0
+        while lead < len(cols) and lead < dpi * 0.05 and cols[lead]:
+            lead += 1
+        idx = np.nonzero(cols[lead:])[0]
+        if lead < len(cols) and (len(idx) == 0 or idx.min() >= dpi * min_gap):
+            x1 = r.x1 + 3 + lead + 2
+            break
+    for k in range(len(long) - 1, -1, -1):
+        r = long[k]
+        strip = r.x0 - content.x0
+        if not (dpi * 0.05 < strip < max_frac * content.width):
+            continue
+        prv = long[k - 1] if k > 0 else None
+        if prv is not None and _boxed(ink, int(prv.x0), int(r.x1), y0, y1):
+            continue
+        cols = inked(int(content.x0), int(r.x0) - 3)
+        lead = 0
+        while lead < len(cols) and lead < dpi * 0.05 and cols[len(cols) - 1 - lead]:
+            lead += 1
+        rest = cols[:len(cols) - lead]
+        idx = np.nonzero(rest)[0]
+        if lead < len(cols) and (len(idx) == 0 or (len(rest) - 1 - idx.max()) >= dpi * min_gap):
+            x0 = r.x0 - 3 - lead - 2
+            break
     return BBox(x0, content.y0, x1, content.y1)
 
 
