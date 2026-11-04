@@ -402,6 +402,9 @@ _MARKERS = [
 _TITLED_RE = re.compile(r"""^[*•"“”'‘’]?\s*[A-Z][a-z]+(?:[ —-]+(?:[A-Z][a-z]+|and|of|&))*$""")
 # a line ending in a telephone-book number: "...Gary------TUrnr 4-8040"
 _PHONE_END_RE = re.compile(r"[A-Z][A-Za-z]{0,7}\.?\s?\d\s?-\s?\d{4}\s*[A-Z]?\W*$")
+# telephone-book yellow pages give themselves away with these
+_YELLOW_RE = re.compile(r"cont'?d\)|listings of this classification|this classification|"
+                        r"continued in next column", re.IGNORECASE)
 _DASH_RE = re.compile(r"[A-Za-z.)]\s?—\s?\d")
 
 
@@ -440,7 +443,8 @@ def section_features(res: PageResult) -> dict:
             "num_start": num_start / max(1, n), "res": res_hits / max(1, n),
             "see": see / max(1, n), "star": star, "titled": titled / max(1, n),
             "dash": dash / max(1, n), "markers": markers,
-            "phone": sum(1 for t in texts if _PHONE_END_RE.search(t)) / max(1, n)}
+            "phone": sum(1 for t in texts if _PHONE_END_RE.search(t)) / max(1, n),
+            "yellow": sum(1 for t in texts if _YELLOW_RE.search(t))}
 
 
 def guess_section(f: dict) -> tuple[str, float]:
@@ -450,7 +454,7 @@ def guess_section(f: dict) -> tuple[str, float]:
     if f.get("phone", 0.0) > 0.3:
         # a telephone book: white pages unless category headings / ad
         # references mark it as the yellow pages
-        if f.get("titled", 0.0) > 0.03 or f["see"] > 0.02:
+        if f.get("titled", 0.0) > 0.03 or f["see"] > 0.02 or f.get("yellow", 0) >= 2:
             return "classified", 0.7
         return "telephone", min(1.0, f["phone"] * 1.5)
     if f["num_start"] > 0.35:
@@ -508,8 +512,9 @@ def assign_sections(works: list[PageWork], overrides: dict[int, str]) -> None:
         w.result.section = sec
 
     # real sections run for dozens of pages: a short island of another
-    # listing section between two long stretches of the same one is a
-    # misreading (advertising pages and explicit overrides excepted)
+    # listing section is a misreading when the listing pages around it
+    # (advertising pages, which may be interleaved, do not count) are
+    # overwhelmingly of one other section
     listing = ("alphabetical", "street", "classified", "misc", "telephone")
     runs: list[list[int]] = []
     for i, w in enumerate(works):
@@ -517,26 +522,22 @@ def assign_sections(works: list[PageWork], overrides: dict[int, str]) -> None:
             runs[-1].append(i)
         else:
             runs.append([i])
-    ads_like = ("ads", "front")
-
-    def neighbour_run(k: int, step: int) -> Optional[list[int]]:
-        j = k + step
-        while 0 <= j < len(runs) and works[runs[j][0]].result.section in ads_like:
-            j += step
-        return runs[j] if 0 <= j < len(runs) else None
-
-    for k, run in enumerate(runs):
-        sec = works[run[0]].result.section
+    original = [w.result.section for w in works]
+    for run in runs:
+        sec = original[run[0]]
         if sec not in listing or len(run) > 2:
             continue
         if any(works[i].result.page in overrides for i in run):
             continue
-        prev, nxt = neighbour_run(k, -1), neighbour_run(k, +1)
-        if prev and nxt and len(prev) >= 3 and len(nxt) >= 3:
-            ps, ns = works[prev[0]].result.section, works[nxt[0]].result.section
-            if ps == ns and ps in listing and ps != sec:
-                for i in run:
-                    works[i].result.section = ps
+        lo, hi = run[0], run[-1]
+        around = [original[j] for j in range(max(0, lo - 8), min(n, hi + 9))
+                  if (j < lo or j > hi) and original[j] in listing]
+        if len(around) < 4:
+            continue
+        top, cnt = Counter(around).most_common(1)[0]
+        if top != sec and cnt >= 0.7 * len(around):
+            for i in run:
+                works[i].result.section = top
 
 
 # --------------------------------------------------------------------------
@@ -565,8 +566,13 @@ def build_entries(work: PageWork, ctx: Context) -> None:
     text_regions = sorted([r for r in res.regions if r.kind is RegionKind.TEXT],
                           key=lambda r: (r.column if r.column >= 0 else 99, r.bbox.x0, r.bbox.y0))
     for r in text_regions:
-        raws = assemble_entries(r.lines, r.bbox, numbered=(sec == "street"),
-                                heading_style="caps" if sec in ("street", "alphabetical", "telephone") else "any")
+        if sec in ("street", "alphabetical", "telephone"):
+            style = "caps"
+        elif sec == "classified" and work.features.get("phone", 0.0) > 0.2:
+            style = "marked"          # telephone-book yellow pages
+        else:
+            style = "any"
+        raws = assemble_entries(r.lines, r.bbox, numbered=(sec == "street"), heading_style=style)
         for raw in raws:
             text = raw.text
             if not text:
@@ -759,6 +765,7 @@ def reparse(works: list[PageWork], overrides: Optional[dict[int, str]] = None) -
         w.result.entries = []
         w.result.ads = []
         w.result.section = ""
+        w.features = section_features(w.result)    # pick up detector changes
     assign_sections(works, overrides or {})
     ctx = Context()
     for w in works:

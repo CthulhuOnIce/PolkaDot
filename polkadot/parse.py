@@ -486,7 +486,8 @@ def parse_street_line(text: str, street: Optional[str], last_number: Optional[st
 
 
 def clean_heading(text: str) -> str:
-    t = clean_text(text).lstrip("*•\"'`").strip()
+    t = clean_text(text).lstrip("*•\"'`▶►> ").strip()
+    t = re.sub(r"\s*\(cont'?d\)\s*$", "", t, flags=re.IGNORECASE)
     t = re.sub(r"\s*[—\-]+\s*Cont(?:d|inued)\.?$", "", t, flags=re.IGNORECASE)
     return t
 
@@ -694,9 +695,9 @@ def parse_telephone(text: str, surname_ctx: Optional[str] = None) -> dict[str, A
     cross-references are returned as kind "other"."""
     t = clean_text(text)
     t = re.sub(r"(?<=[A-Za-z])[!|]", "l", t)            # OCR: "TEmp!" -> "TEmpl"
-    t = re.sub(r"\b(Whi?tn?g)\s*-\s*(\d{4}(?:-[A-Z])?)", r"Whiting \2", t)
+    t = re.sub(r"\b(Whi?tn?g)\s*-\s*(\d{3,4})(?:-([A-Z]))?", lambda m: "Whiting " + m.group(2) + (" " + m.group(3) if m.group(3) else ""), t)
     # stray characters bleeding in from the page edge / gutter
-    t = re.sub(r"^(?:[^A-Za-z\"“”']+\s+|[a-z§}{|]\s+)+(?=[A-Z])", "", t)
+    t = re.sub(r"^(?:[^A-Za-z\"“”']+\s*|[a-z§}{|]\s+)+(?=[A-Z])", "", t)
     f: dict[str, Any] = {}
     if re.search(r"\balso\s+see\b", t, re.IGNORECASE):
         f["see_also"] = re.split(r"\balso\s+see\b", t, flags=re.IGNORECASE)[1].strip()

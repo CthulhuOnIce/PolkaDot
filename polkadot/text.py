@@ -116,13 +116,23 @@ def looks_like_heading(line: Line, col: BBox, margin: float, em: float,
     caps = letters and sum(c.isupper() for c in letters) / len(letters) > 0.85
     centred = (abs(b.cx - col.cx) < col.width * 0.12 and b.width < col.width * 0.75
                and b.x0 > margin + em * 0.8)
-    if caps and len(letters) >= 3 and (centred or len(toks) <= 3) and "—" not in t[:2]:
+    # capitals: a surname / street heading ("caps" style) even when short and
+    # flush left; elsewhere only when centred - flush-left capitals there are
+    # firm names (telephone yellow pages set them on a line of their own)
+    if caps and len(letters) >= 3 and (centred or (len(toks) <= 3 and style == "caps")) \
+            and "—" not in t[:2] and style != "marked":
         return True
     if style == "caps":
         return False
     indented = b.x0 > margin + em * 0.8
     # OCR often reads the star that marks paid headings as a quote mark
-    starred = re.match(r"""^[*•"“”'‘’]+\s*[A-Z]""", t) is not None
+    starred = re.match(r"""^[*•"“”'‘’▶►>]+\s*[A-Z]""", t) is not None
+    if re.search(r"\(cont'?d\)\s*$", t, re.IGNORECASE) and len(toks) <= 8:
+        return True        # "Physicians & Surgeons (M.D.) (cont'd)"
+    if re.match(r"""^['"‘’]?[▶►>]\s*[A-Z]""", t) and len(toks) <= 7:
+        return True        # yellow-pages category heading, set flush left
+    if style == "marked":
+        return False       # telephone yellow pages: only marked headings count
     if starred and (centred or indented) and len(toks) <= 6:
         return True
     loose_centre = abs(b.cx - col.cx) < col.width * 0.2 and b.width < col.width * 0.8 and indented
